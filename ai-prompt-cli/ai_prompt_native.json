@@ -1,0 +1,7 @@
+{
+  "name": "ai_prompt_native",
+  "description": "Native messaging host for AI Provider Automator",
+  "path": "/home/wcooke/projects/ai-prompt/ai-prompt-cli/native-host.py",
+  "type": "stdio",
+  "allowed_extensions": ["ai-provider-automator@localhost"]
+}

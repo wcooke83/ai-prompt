@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>ChatGPT Copy Button Investigation</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #e0e0e0; }
+    h1, h2 { color: #4fc3f7; }
+    pre { background: #2d2d2d; padding: 15px; border-radius: 5px; overflow-x: auto; }
+    .code { color: #81c784; }
+    .warning { color: #ffb74d; }
+    .error { color: #ef5350; }
+    .highlight { background: #3d3d3d; padding: 2px 6px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>ChatGPT "Copy code" Button Investigation</h1>
+
+  <h2>Expected HTML Structure (as of late 2024)</h2>
+  <pre>
+&lt;!-- Code block container --&gt;
+&lt;div class="contain-inline-size rounded-md border-[0.5px] border-token-border-medium relative bg-token-sidebar-surface-secondary my-4"&gt;
+
+  &lt;!-- Header with language and copy button --&gt;
+  &lt;div class="flex items-center text-token-text-secondary px-4 py-2 text-xs font-sans justify-between rounded-t-md h-9 bg-token-sidebar-surface-primary dark:bg-token-main-surface-secondary"&gt;
+    &lt;span&gt;python&lt;/span&gt;
+
+    &lt;!-- Copy code button --&gt;
+    <span class="highlight">&lt;button class="flex gap-1 items-center"&gt;</span>
+      &lt;svg ... /&gt; &lt;!-- Copy/check icon --&gt;
+      <span class="code">"Copy code"</span> or <span class="code">"Copied!"</span>
+    &lt;/button&gt;
+  &lt;/div&gt;
+
+  &lt;!-- Code content --&gt;
+  &lt;div class="overflow-y-auto p-4"&gt;
+    &lt;code class="!whitespace-pre hljs language-python"&gt;
+      ... code content ...
+    &lt;/code&gt;
+  &lt;/div&gt;
+&lt;/div&gt;
+  </pre>
+
+  <h2>Key Observations</h2>
+  <ul>
+    <li>The "Copy code" button does <span class="warning">NOT have a data-testid attribute</span></li>
+    <li>It's inside a header div that's a sibling to the code content div</li>
+    <li>Button text changes from "Copy code" to "Copied!" after clicking</li>
+    <li>Uses modern Clipboard API (<code>navigator.clipboard.writeText()</code>)</li>
+  </ul>
+
+  <h2>Why Programmatic Click Might Fail</h2>
+  <ol>
+    <li><span class="error">Trusted Events</span>: Browsers may require user-initiated (trusted) events for clipboard access</li>
+    <li><span class="error">React Event Handling</span>: React uses synthetic events; DOM-level events may not trigger handlers</li>
+    <li><span class="error">Focus/Visibility</span>: Clipboard API may require document focus</li>
+    <li><span class="error">Permissions</span>: Extension content scripts may lack clipboard-write permission</li>
+  </ol>
+
+  <h2>Reliable Selectors</h2>
+  <pre>
+<span class="code">// Find all code blocks</span>
+document.querySelectorAll('pre code')
+
+<span class="code">// Find code block containers (each has a header with copy button)</span>
+document.querySelectorAll('div.contain-inline-size.rounded-md')
+
+<span class="code">// Find Copy code buttons by text content</span>
+Array.from(document.querySelectorAll('button')).filter(b => b.textContent.includes('Copy code'))
+
+<span class="code">// Find by structure: button in code block header</span>
+document.querySelectorAll('div.contain-inline-size button.flex.gap-1')
+  </pre>
+
+  <h2>Alternative: Direct Code Extraction (More Reliable)</h2>
+  <pre>
+<span class="code">// Instead of clicking the button, extract code directly:</span>
+
+function extractCodeFromBlock(codeBlockContainer) {
+  const codeElement = codeBlockContainer.querySelector('code');
+  return codeElement ? codeElement.textContent : null;
+}
+
+<span class="code">// Get all code blocks</span>
+const codeBlocks = document.querySelectorAll('pre code');
+codeBlocks.forEach((code, i) => {
+  console.log(`Code block ${i}:`, code.textContent);
+});
+  </pre>
+
+  <h2>The Copy Button's Likely Implementation</h2>
+  <pre>
+<span class="code">// ChatGPT's React component likely does something like:</span>
+
+const handleCopy = async () => {
+  try {
+    await navigator.clipboard.writeText(codeContent);
+    setButtonText('Copied!');
+    setTimeout(() => setButtonText('Copy code'), 2000);
+  } catch (err) {
+    // Fallback to document.execCommand
+    const textarea = document.createElement('textarea');
+    textarea.value = codeContent;
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    document.body.removeChild(textarea);
+  }
+};
+  </pre>
+
+  <h2>Extension Fix Recommendations</h2>
+  <ol>
+    <li><strong>Don't click the button</strong> - Just extract the text directly from &lt;code&gt; elements</li>
+    <li><strong>If button click is required</strong>:
+      <ul>
+        <li>Use <code>element.click()</code> directly, not synthetic events</li>
+        <li>Ensure document has focus first</li>
+        <li>Grant clipboard permissions in manifest.json</li>
+      </ul>
+    </li>
+    <li><strong>For response copying</strong>: Use <code>button[data-testid="copy-turn-action-button"]</code> which is the main "Copy" button for the entire response</li>
+  </ol>
+</body>
+</html>

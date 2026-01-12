@@ -1,0 +1,64 @@
+{
+  "manifest_version": 2,
+  "name": "AI Provider Automator",
+  "version": "2.0.0",
+  "description": "Automates AI chat providers via WebSocket commands",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "tabs",
+    "nativeMessaging",
+    "clipboardRead",
+    "clipboardWrite",
+    "*://chatgpt.com/*",
+    "*://chat.openai.com/*",
+    "*://claude.ai/*",
+    "*://grok.com/*",
+    "*://grok.x.ai/*",
+    "*://x.com/*",
+    "*://chat.deepseek.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "*://chatgpt.com/*",
+        "*://chat.openai.com/*",
+        "*://grok.com/*",
+        "*://grok.x.ai/*",
+        "*://x.com/i/grok*",
+        "*://claude.ai/*",
+        "*://chat.deepseek.com/*"
+      ],
+      "js": [
+        "logging.js",
+        "providers/index.js",
+        "providers/chatgpt.js",
+        "providers/grok.js",
+        "providers/claude.js",
+        "providers/deepseek.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "scripts": [
+      "providers/index.js",
+      "providers/chatgpt.js",
+      "providers/grok.js",
+      "providers/claude.js",
+      "providers/deepseek.js",
+      "background.js"
+    ],
+    "persistent": true
+  },
+  "browser_action": {
+    "default_popup": "popup.html",
+    "default_title": "AI Provider Automator"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "ai-provider-automator@localhost"
+    }
+  }
+}
