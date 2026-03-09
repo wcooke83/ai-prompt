@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     default_timeout: float = 120.0
     host: str = "0.0.0.0"
     port: int = 8000
+    api_key: str | None = None  # Set AI_PROMPT_API_KEY to enable auth
 
     class Config:
         env_prefix = "AI_PROMPT_"
