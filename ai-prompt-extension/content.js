@@ -579,7 +579,48 @@ async function waitForDomStability(element, stabilizeMs = 3000, maxWaitMs = 3000
   });
 }
 
-// Paste text into element (simulates Ctrl+V)
+// Enter text one character at a time ("type" mode — used when a provider's paste toggle is OFF).
+// Mirrors the paste path's insert primitive (execCommand insertText for contenteditable, value
+// append for textarea) applied per character, with a short delay so it visibly types without the
+// multi-second lag a realistic human cadence would add on long prompts.
+async function typeByKeystroke(element, text, isContentEditable) {
+  if (isContentEditable) {
+    const placeholder = element.querySelector('p.is-empty, p.is-editor-empty, [data-placeholder]');
+    if (placeholder) {
+      placeholder.textContent = '';
+      placeholder.classList.remove('is-empty', 'is-editor-empty');
+    }
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    for (const char of text) {
+      document.execCommand('insertText', false, char);
+      element.dispatchEvent(new InputEvent('input', {
+        bubbles: true, cancelable: true, inputType: 'insertText', data: char
+      }));
+      await sleep(2 + Math.random() * 6);
+    }
+    return;
+  }
+  if (element.tagName === 'TEXTAREA') {
+    for (const char of text) {
+      element.value = (element.value || '') + char;
+      element.dispatchEvent(new InputEvent('input', {
+        bubbles: true, cancelable: true, inputType: 'insertText', data: char
+      }));
+      await sleep(2 + Math.random() * 6);
+    }
+    return;
+  }
+  // Unknown element type — fall back to a single bulk insert.
+  document.execCommand('insertText', false, text);
+}
+
+// Insert text into element. When this provider's paste toggle is ON (USE_PASTE, the default) the
+// whole prompt is inserted in one go; when OFF it is typed key-by-key via typeByKeystroke.
 async function typeText(element, text) {
   console.log('[AI-Automator] ========== typeText START ==========');
   console.log('[AI-Automator] Text length:', text.length);
@@ -597,6 +638,14 @@ async function typeText(element, text) {
   // Check if this is a contenteditable element (ChatGPT, Claude, etc.)
   const isContentEditable = element.contentEditable === 'true' || element.isContentEditable;
   console.log('[AI-Automator] isContentEditable:', isContentEditable);
+
+  // TYPE mode (this provider's paste toggle is OFF): enter the prompt key-by-key instead of pasting.
+  if (!USE_PASTE) {
+    console.log('[AI-Automator] USE_PASTE off -> typing key-by-key');
+    await typeByKeystroke(element, text, isContentEditable);
+    console.log('[AI-Automator] ========== typeText END ==========');
+    return;
+  }
 
   if (isContentEditable) {
     console.log('[AI-Automator] Handling contenteditable element...');
@@ -1531,24 +1580,129 @@ async function waitForGrokResponse(provider, existingResponseIds = new Set(), ti
 }
 
 // Generic wait for response (for other providers) - FIXED VERSION
+// Log a snapshot of what the extractor currently sees (used for heartbeats, the stability fallback,
+// and on timeout) so a stale selector or a changed provider DOM is diagnosable from a real
+// (logged-in) run's logs instead of guessing.
+function dumpResponseDiagnostics(selectors, provider, label) {
+  try {
+    const containers = findAllElements(selectors.responseContainer);
+    console.log(`[AI-Automator][diag] ${label}: responseContainer matches=${containers.length} selectors=${JSON.stringify(selectors.responseContainer)}`);
+    console.log(`[AI-Automator][diag] streamingIndicator present=${!!findElement(selectors.streamingIndicator)} selectors=${JSON.stringify(selectors.streamingIndicator)}`);
+    if (containers.length > 0) {
+      const latest = containers[containers.length - 1];
+      const txt = (latest.textContent || '').trim();
+      console.log(`[AI-Automator][diag] latest=<${latest.tagName.toLowerCase()}> data-testid=${latest.getAttribute('data-testid')} class="${(latest.className || '').toString().substring(0, 80)}"`);
+      console.log(`[AI-Automator][diag] latest textLen=${txt.length} preview="${txt.substring(0, 200).replace(/\s+/g, ' ')}"`);
+      console.log(`[AI-Automator][diag] pre>code=${latest.querySelectorAll('pre code').length} <p>=${latest.querySelectorAll('p').length}`);
+      const labels = Array.from(latest.querySelectorAll('button[aria-label]')).map(b => b.getAttribute('aria-label')).slice(0, 20);
+      console.log(`[AI-Automator][diag] button aria-labels in latest: ${JSON.stringify(labels)}`);
+    }
+    if (provider && typeof provider.detectStreamingComplete === 'function') {
+      console.log(`[AI-Automator][diag] provider.detectStreamingComplete()=${provider.detectStreamingComplete(document)}`);
+    }
+  } catch (e) {
+    console.warn('[AI-Automator][diag] dump failed:', e.message);
+  }
+}
+
 async function waitForResponse(selectors, provider, initialResponseCount, timeout = 120000) {
-  console.log('[AI-Automator] waitForResponse started, initialResponseCount:', initialResponseCount);
+  console.log('[AI-Automator] waitForResponse started, initialResponseCount:', initialResponseCount,
+    '| timeout:', timeout + 'ms',
+    '| responseContainer selectors:', JSON.stringify(selectors.responseContainer),
+    '| streamingIndicator selectors:', JSON.stringify(selectors.streamingIndicator));
+  // Snapshot the DOM the instant we start waiting, so a never-matching selector is obvious from line 1
+  // (the old logs went silent here for the whole timeout when no new response container was detected).
+  dumpResponseDiagnostics(selectors, provider, 'WAIT-START');
   const startTime = Date.now();
+  // Fallback completion: if a new response exists, there's NO streaming indicator, and the text has
+  // stopped changing for this long, treat it complete even if the provider's button/attribute
+  // heuristic never fires (common when a provider changes its DOM).
+  //
+  // A provider may raise this threshold via `provider.stabilityMs`. Reasoning models (e.g. DeepSeek)
+  // legitimately pause for many seconds between their "thinking"/web-search phase and the real
+  // answer; a 4s stall there is NOT completion. The provider keeps the floor but can lengthen it.
+  const _baseStabilityMs = Math.max(DOM_STABILIZE_MS || 3000, 4000);
+  const STABILITY_MS = provider && Number(provider.stabilityMs) > 0
+    ? Math.max(_baseStabilityMs, Number(provider.stabilityMs))
+    : _baseStabilityMs;
 
   return new Promise((resolve, reject) => {
     let resolved = false;
     let extracting = false;
-    
+    let lastText = '';
+    let lastChangeAt = Date.now();
+    let lastHeartbeatAt = 0;
+    let lastDiagAt = 0;        // elapsed-seconds of the last periodic DOM diagnostic dump
+    let sawNewResponse = false; // log the first time a new response container appears
+    let lastSuppressLogAt = 0; // throttle the "stability suppressed (provider busy)" log
+
     const checkCompletion = async () => {
       if (resolved || extracting) return false;
-      
-      const currentResponses = findAllElements(selectors.responseContainer);
 
-      if (currentResponses.length > initialResponseCount) {
-        // Check if streaming is complete
-        const streamingComplete = provider && typeof provider.detectStreamingComplete === 'function'
+      const currentResponses = findAllElements(selectors.responseContainer);
+      const _newResponse = currentResponses.length > initialResponseCount;
+      const _streaming = isStreaming(selectors);
+      const _elapsedS = Math.round((Date.now() - startTime) / 1000);
+
+      // Unconditional heartbeat (~every 5s). Crucially this fires even when NO new response container
+      // is detected, so a wait that makes no progress — e.g. the responseContainer selector no longer
+      // matches the provider's DOM, or isStreaming() is stuck true — is visible in the logs instead of
+      // going silent for the entire timeout (the previous heartbeat only ran once a new response was
+      // already detected, which is exactly the case that was failing).
+      if (Date.now() - lastHeartbeatAt > 5000) {
+        lastHeartbeatAt = Date.now();
+        let _hb = `[AI-Automator] …waiting ${_elapsedS}s: responseContainers=${currentResponses.length} (initial=${initialResponseCount}), newResponse=${_newResponse}, streaming=${_streaming}`;
+        if (_newResponse) {
+          const _t = (currentResponses[currentResponses.length - 1].textContent || '').trim();
+          _hb += `, latestTextLen=${_t.length}`;
+        }
+        console.log(_hb);
+        // While stuck with no detectable new response, periodically dump full DOM diagnostics (first at
+        // ~8s, then ~every 15s) so the actual provider DOM is captured live rather than only at timeout.
+        if (!_newResponse && _elapsedS >= 8 && (lastDiagAt === 0 || _elapsedS - lastDiagAt >= 15)) {
+          lastDiagAt = _elapsedS;
+          dumpResponseDiagnostics(selectors, provider, `WAITING-${_elapsedS}s`);
+        }
+      }
+
+      if (_newResponse) {
+        if (!sawNewResponse) {
+          sawNewResponse = true;
+          console.log(`[AI-Automator] ✓ New response container detected after ${_elapsedS}s (count ${initialResponseCount}→${currentResponses.length}); now watching for completion`);
+        }
+        // Track text stability as a fallback completion signal for when the provider's own
+        // button/attribute heuristic never fires (because the site changed its DOM).
+        const _latest = currentResponses[currentResponses.length - 1];
+        const _curText = _latest.textContent || '';
+        if (_curText !== lastText) { lastText = _curText; lastChangeAt = Date.now(); }
+        const _providerComplete = provider && typeof provider.detectStreamingComplete === 'function'
           ? provider.detectStreamingComplete(document)
-          : !isStreaming(selectors);
+          : !_streaming;
+        // A provider can VETO the generic stability fallback while it knows it's still working — e.g.
+        // DeepSeek mid-"thinking"/web-search, where the visible text legitimately stalls for many
+        // seconds before the real answer streams. Without this veto that pause is misread as
+        // completion and the reasoning trace gets captured instead of the answer.
+        const _providerBusy = provider && typeof provider.isLikelyStillGenerating === 'function'
+          ? provider.isLikelyStillGenerating(document) === true
+          : false;
+        const _stableMs = Date.now() - lastChangeAt;
+        const _stabilityComplete =
+          !_streaming && !_providerBusy && _curText.trim().length > 0 && _stableMs >= STABILITY_MS;
+
+        // Surface (throttled) when we WOULD have fired the fallback but the provider says it's busy,
+        // so a genuinely stuck wait is still diagnosable rather than silently hanging.
+        if (_providerBusy && !_providerComplete && !_streaming && _stableMs >= STABILITY_MS &&
+            Date.now() - lastSuppressLogAt > 5000) {
+          lastSuppressLogAt = Date.now();
+          console.log(`[AI-Automator] STABILITY fallback suppressed — provider reports still generating (textLen=${_curText.trim().length}, stalled ${Math.round(_stableMs / 1000)}s)`);
+        }
+
+        if (_stabilityComplete && !_providerComplete) {
+          console.log(`[AI-Automator] STABILITY fallback firing (no streaming indicator + text unchanged ${Math.round(_stableMs / 1000)}s, textLen=${_curText.trim().length}). Provider heuristic never fired — see [diag] below.`);
+          dumpResponseDiagnostics(selectors, provider, 'STABILITY-FALLBACK');
+        }
+
+        const streamingComplete = _providerComplete || _stabilityComplete;
 
         if (streamingComplete) {
           extracting = true;
@@ -1622,18 +1776,29 @@ async function waitForResponse(selectors, provider, initialResponseCount, timeou
       await checkCompletion();
     }, 500);
 
-    const timeoutId = setTimeout(() => {
+    const timeoutId = setTimeout(async () => {
+      if (resolved) return;
       clearInterval(pollInterval);
       if (observer) observer.disconnect();
-      
-      // Try to get any response on timeout
-      console.warn('[AI-Automator] Timeout reached, attempting final extraction...');
-      const result = getLatestResponse(selectors, provider);
-      if (result && result.text) {
-        resolve(result);
-      } else {
-        reject(new Error('Timeout waiting for response'));
+
+      // Dump what the extractor currently sees, then attempt ONE final extraction.
+      // (The old code called the async getLatestResponse WITHOUT awaiting, so result was a Promise
+      //  and result.text was always undefined — it therefore always rejected, discarding a good response.)
+      console.warn(`[AI-Automator] Timeout after ${Math.round((Date.now() - startTime) / 1000)}s; dumping DOM diagnostics and attempting final extraction...`);
+      dumpResponseDiagnostics(selectors, provider, 'TIMEOUT');
+      try {
+        const result = await getLatestResponse(selectors, provider);
+        if (result && result.text && result.text.trim().length >= 1) {
+          console.log('[AI-Automator] Final extraction recovered text, length:', result.text.trim().length);
+          resolved = true;
+          resolve(result);
+          return;
+        }
+      } catch (e) {
+        console.error('[AI-Automator] Final extraction failed:', e.message);
       }
+      resolved = true;
+      reject(new Error('Timeout waiting for response (no extractable text — see [diag] logs for the actual DOM state)'));
     }, timeout);
 
     let observer = null;
