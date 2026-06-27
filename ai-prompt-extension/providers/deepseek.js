@@ -5,7 +5,13 @@ const DeepSeekProvider = {
   hostPatterns: [
     '*://chat.deepseek.com/*'
   ],
-  
+
+  // DeepSeek is a reasoning model: it shows a "Thought for N seconds" trace and may run a web search
+  // BEFORE it writes the actual answer, stalling the visible text for many seconds. Raise the generic
+  // stability-fallback floor well above the 4s default so a reasoning pause is never mistaken for a
+  // finished response (the `isLikelyStillGenerating` veto below is the primary guard; this is a backstop).
+  stabilityMs: 12000,
+
   selectors: {
     // Textarea selectors - multiple options for reliability
     textarea: [
@@ -89,31 +95,44 @@ const DeepSeekProvider = {
     return 'deepseek-chat'; // Default
   },
   
-  // Extract response text from a response element
+  // Extract response text from a response element.
+  // CRITICAL: exclude DeepSeek's "thinking"/reasoning trace so we return the ANSWER, not the
+  // chain-of-thought. The reasoning is rendered in its own block (the "Thought for N seconds" panel);
+  // the answer renders into a dedicated markdown container that only appears once the answer starts.
   extractResponseText: function(responseElement) {
-    // Try to find markdown content first
-    for (const selector of this.selectors.markdownContent) {
-      const markdown = responseElement.querySelector(selector);
+    // Work on a clone so stripping the reasoning + UI chrome never touches the live page.
+    const clone = responseElement.cloneNode(true);
+    clone.querySelectorAll('button, [role="button"], svg').forEach(el => el.remove());
+    // Drop the reasoning/thinking panel. Its exact class varies across DeepSeek builds, so match
+    // defensively on think/reason (the answer container is "markdown"/"ds-markdown", never matched).
+    clone
+      .querySelectorAll('[class*="think" i], [class*="reason" i], [class*="chain-of-thought" i]')
+      .forEach(el => el.remove());
+
+    // Prefer the dedicated answer markdown container (present only once the real answer renders).
+    for (const selector of ['div.ds-markdown', ...this.selectors.markdownContent]) {
+      const markdown = clone.querySelector(selector);
       if (markdown) {
-        // Clone to avoid modifying original
-        const clone = markdown.cloneNode(true);
-        // Remove any UI elements (buttons, etc.)
-        clone.querySelectorAll('button, [role="button"]').forEach(el => el.remove());
-        const text = clone.textContent.trim();
+        const text = (markdown.textContent || '').trim();
         if (text) return { text, images: [] };
       }
     }
-    
-    // Fallback: get all text content
-    const clone = responseElement.cloneNode(true);
-    // Remove buttons and UI elements
-    clone.querySelectorAll('button, [role="button"], svg').forEach(el => el.remove());
-    return { text: clone.textContent.trim(), images: [] };
+
+    // Fallback: whatever text remains after the reasoning block was stripped.
+    return { text: (clone.textContent || '').trim(), images: [] };
   },
   
-  // Detect if streaming is complete
+  // Detect if streaming is complete.
+  // Completion is the answer's action toolbar (copy / regenerate) appearing after the message — but
+  // ONLY once the model is no longer reasoning/searching (see isLikelyStillGenerating), so the
+  // transient state during "thinking" is never read as done.
   detectStreamingComplete: function(document) {
-    // Check streaming indicators first
+    // Never complete while the model is still thinking / searching / writing.
+    if (typeof this.isLikelyStillGenerating === 'function' && this.isLikelyStillGenerating(document)) {
+      return false;
+    }
+
+    // Explicit streaming indicators (rarely match DeepSeek's div-based controls, but cheap to check).
     for (const selector of this.selectors.streamingIndicator) {
       if (document.querySelector(selector)) {
         return false;
@@ -126,12 +145,48 @@ const DeepSeekProvider = {
 
     const latestMessage = messages[messages.length - 1];
 
-    // Look for any action buttons after the message (in parent or next sibling)
+    // Complete once the answer's action toolbar (copy / regenerate) has rendered after the message…
     const parent = latestMessage.parentElement;
     const actionButtons = parent?.querySelector('div.ds-flex div.ds-icon-button[role="button"]') ||
                           latestMessage.nextElementSibling?.querySelector('div.ds-icon-button[role="button"]');
+    if (actionButtons) return true;
 
-    return !!actionButtons;
+    // …or once a Copy button is present for the answer (alternate DOM where the toolbar is inline).
+    if (typeof this.findCopyButton === 'function' && this.findCopyButton(latestMessage)) return true;
+
+    return false;
+  },
+
+  // Is DeepSeek still working (reasoning / searching / writing)? When true, the generic stability
+  // fallback in content.js is vetoed so a reasoning pause can't be mistaken for the finished answer.
+  //
+  // Primary signal (robust, confirmed from real logs): during the "thinking" phase the message has
+  // NO answer-markdown container and NO completion toolbar yet — it holds only the reasoning trace.
+  // We treat that as "still working" and keep waiting for the answer to render.
+  isLikelyStillGenerating: function(document) {
+    try {
+      // An explicit stop / generating affordance is showing (best-effort; DeepSeek mostly uses divs).
+      if (document.querySelector('button[aria-label*="Stop" i], [class*="stop-generat" i]')) {
+        return true;
+      }
+
+      const messages = document.querySelectorAll('div.ds-message');
+      if (messages.length === 0) return false;
+      const latest = messages[messages.length - 1];
+
+      const hasToolbar = !!(
+        latest.parentElement?.querySelector('div.ds-flex div.ds-icon-button[role="button"]') ||
+        latest.nextElementSibling?.querySelector('div.ds-icon-button[role="button"]')
+      );
+      // The answer renders into a dedicated markdown / code container that does NOT exist while the
+      // model is only showing its reasoning. No answer container + no toolbar ⇒ still working.
+      const hasAnswer = !!latest.querySelector('div.ds-markdown, div[class*="markdown"], pre code');
+
+      return !hasToolbar && !hasAnswer;
+    } catch (e) {
+      // Be conservative: if anything goes wrong, don't claim "busy" (let normal detection proceed).
+      return false;
+    }
   },
   
   // Find copy button specifically for DeepSeek
