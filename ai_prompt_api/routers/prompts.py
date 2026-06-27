@@ -1,11 +1,12 @@
 """Prompt submission endpoint."""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from ..auth import require_api_key
 from ..config import settings
 from ..models import ImageData, PromptRequest, PromptResponse
 
-router = APIRouter(tags=["prompts"])
+router = APIRouter(tags=["prompts"], dependencies=[Depends(require_api_key)])
 
 
 @router.post("/prompt", response_model=PromptResponse)

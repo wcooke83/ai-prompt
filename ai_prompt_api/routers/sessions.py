@@ -1,10 +1,11 @@
 """Session management endpoints."""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from ..auth import require_api_key
 from ..models import DeleteResponse, SessionInfo, SessionListResponse
 
-router = APIRouter(prefix="/sessions", tags=["sessions"])
+router = APIRouter(prefix="/sessions", tags=["sessions"], dependencies=[Depends(require_api_key)])
 
 
 @router.get("", response_model=SessionListResponse)
