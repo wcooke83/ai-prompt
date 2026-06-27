@@ -1,7 +1,7 @@
 // Background script - Provider-agnostic WebSocket manager with Native Messaging support
 
 // ============ Centralized Logging System ============
-const LOG_BUFFER_SIZE = 500;
+const LOG_BUFFER_SIZE = 3000; // generous so a full prompt→response run (with heartbeats/diagnostics) isn't truncated
 const logBuffer = [];
 
 function log(source, level, ...args) {
@@ -70,8 +70,12 @@ let useNativeMessaging = true; // Prefer native messaging
 let nativePort = null;
 let debugLogging = false; // Debug logging for content scripts
 let keepTabsOpen = false; // Keep tabs open after response (overrides ephemeral)
-let usePasteInput = false; // Use paste instead of keystrokes for text input
+let hideTabs = false; // Open provider tabs hidden (active:false + tabs.hide) so they never appear
+// Provider names that paste the whole prompt in one go (fast) instead of typing it key-by-key.
+// null = not yet loaded -> treated as "all providers paste" (the default). Tracked per provider.
+let pasteProviders = null;
 let domStabilizeMs = 3000; // Milliseconds of DOM inactivity before extracting response
+let disabledProviders = []; // Provider names the user switched off — never auto-selected or used for failover
 
 
 // Session management: maps session_id -> { tabId, url, provider }
@@ -105,6 +109,22 @@ function getNewChatUrl(providerName) {
   return urls[providerName] || urls['chatgpt'];
 }
 
+// Whether the user has left this provider enabled (default: yes, unless explicitly switched off)
+function isProviderEnabled(name) {
+  return !disabledProviders.includes(name);
+}
+
+// Whether this provider should paste the whole prompt at once (default: yes). When off, the content
+// script enters the prompt key-by-key. null pasteProviders = default (every provider pastes).
+function usePasteFor(name) {
+  return pasteProviders === null || pasteProviders.includes(name);
+}
+
+// Resolve pasteProviders to a concrete list for the popup/status (coalesces the null default).
+function resolvedPasteProviders() {
+  return pasteProviders === null ? ProviderRegistry.getAll().map(p => p.name) : pasteProviders;
+}
+
 // Get providers sorted by user preference
 function getOrderedProviders() {
   const all = ProviderRegistry.getAll();
@@ -117,10 +137,10 @@ function getOrderedProviders() {
   });
 }
 
-// Get first available provider (has implemented selectors)
+// Get first available provider (enabled + has implemented selectors)
 function getFirstAvailableProvider() {
   for (const provider of getOrderedProviders()) {
-    if (provider.selectors.textarea && provider.selectors.textarea.length > 0) {
+    if (isProviderEnabled(provider.name) && provider.selectors.textarea && provider.selectors.textarea.length > 0) {
       return provider;
     }
   }
@@ -166,7 +186,9 @@ function connectNative() {
       connect();
     });
 
-    updateConnectionState('connected');
+    // Don't claim 'connected' yet — wait for the host's 'host_ready' message
+    // (handled above). If the native host isn't installed, onDisconnect fires
+    // and we fall back to WebSocket, which reports the real connection state.
   } catch (e) {
     log('Background', 'error', 'Failed to connect to native host:', e);
     nativePort = null;
@@ -178,7 +200,7 @@ function connectNative() {
 // ============ Load Settings & Initialize ============
 
 // Load saved settings from storage
-browser.storage.local.get(['wsPort', 'fastReconnect', 'providerOrder', 'useNativeMessaging', 'debugLogging', 'keepTabsOpen', 'usePasteInput', 'domStabilizeMs']).then(result => {
+browser.storage.local.get(['wsPort', 'fastReconnect', 'providerOrder', 'useNativeMessaging', 'debugLogging', 'keepTabsOpen', 'hideTabs', 'usePasteInput', 'pasteProviders', 'domStabilizeMs', 'disabledProviders']).then(result => {
   if (result.wsPort) {
     wsPort = result.wsPort;
   }
@@ -197,11 +219,25 @@ browser.storage.local.get(['wsPort', 'fastReconnect', 'providerOrder', 'useNativ
   if (result.keepTabsOpen !== undefined) {
     keepTabsOpen = result.keepTabsOpen;
   }
-  if (result.usePasteInput !== undefined) {
-    usePasteInput = result.usePasteInput;
+  if (result.hideTabs !== undefined) {
+    hideTabs = result.hideTabs;
+  }
+  if (Array.isArray(result.pasteProviders)) {
+    pasteProviders = result.pasteProviders;
+  } else if (result.usePasteInput !== undefined) {
+    // Migrate the old single global toggle: on -> every provider pastes, off -> every provider types.
+    pasteProviders = result.usePasteInput ? ProviderRegistry.getAll().map(p => p.name) : [];
+    browser.storage.local.set({ pasteProviders });
+  } else {
+    // No saved preference -> default every provider to paste (one-shot, fast).
+    pasteProviders = ProviderRegistry.getAll().map(p => p.name);
+    browser.storage.local.set({ pasteProviders });
   }
   if (result.domStabilizeMs !== undefined) {
     domStabilizeMs = result.domStabilizeMs;
+  }
+  if (Array.isArray(result.disabledProviders)) {
+    disabledProviders = result.disabledProviders;
   }
 
   // Try native messaging first, fall back to WebSocket
@@ -221,8 +257,19 @@ function updateConnectionState(state) {
   }).catch(() => {});
 }
 
+// Detach handlers and close the current socket so its onclose doesn't fire a
+// stray scheduleReconnect() that races with a fresh connect() and leaks sockets.
+function closeWs() {
+  if (ws) {
+    ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null;
+    try { ws.close(); } catch (e) {}
+    ws = null;
+  }
+}
+
 function connect() {
-  if (ws && ws.readyState === WebSocket.OPEN) return;
+  // Already connected or mid-handshake — don't open a second socket.
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
   try {
     ws = new WebSocket(`ws://localhost:${wsPort}`);
@@ -319,6 +366,20 @@ async function detectActiveProvider() {
   return null;
 }
 
+// Apply the "hide automation tabs" setting to a tab: when hideTabs is on, remove it from the tab
+// strip via tabs.hide (needs the "tabHide" permission). The tab keeps running and the content script
+// still drives it; note some providers may throttle a hidden/background tab. No-op when hideTabs is off.
+async function applyTabVisibility(tabId) {
+  if (!hideTabs || !tabId) return;
+  try {
+    if (browser.tabs.hide) {
+      await browser.tabs.hide(tabId);
+    }
+  } catch (e) {
+    console.log('tabs.hide failed:', e.message);
+  }
+}
+
 // Create tab for provider
 async function createProviderTab(providerName) {
   const provider = ProviderRegistry.get(providerName);
@@ -328,7 +389,8 @@ async function createProviderTab(providerName) {
 
   const newSessionId = generateSessionId();
   const newChatUrl = getNewChatUrl(providerName);
-  const newTab = await browser.tabs.create({ url: newChatUrl, active: true });
+  const newTab = await browser.tabs.create({ url: newChatUrl, active: !hideTabs });
+  await applyTabVisibility(newTab.id);
 
   // Wait for page to load completely
   await new Promise(resolve => {
@@ -382,14 +444,19 @@ async function getOrCreateSessionTab(sessionId, preferredProvider) {
     try {
       const tab = await browser.tabs.get(session.tabId);
       if (tab) {
-        // Tab exists, focus it
-        await browser.tabs.update(tab.id, { active: true });
+        // Tab exists — focus it (or keep it hidden when hideTabs is on)
+        if (hideTabs) {
+          await applyTabVisibility(tab.id);
+        } else {
+          await browser.tabs.update(tab.id, { active: true });
+        }
         return { tab, provider, sessionId, isNew: false };
       }
     } catch (e) {
       // Tab was closed, try to restore from URL
       if (session.url) {
-        const newTab = await browser.tabs.create({ url: session.url, active: true });
+        const newTab = await browser.tabs.create({ url: session.url, active: !hideTabs });
+        await applyTabVisibility(newTab.id);
         // Wait for page to load
         await new Promise(resolve => {
           const listener = (tabId, info) => {
@@ -442,7 +509,7 @@ async function tryProviderWithFailover(text, request_id, preferredProvider, sess
           text,
           attachments,
           debugLogging,
-          usePasteInput,
+          usePasteInput: usePasteFor(provider.name),
           provider: {
             name: provider.name,
             selectors: provider.selectors
@@ -470,9 +537,21 @@ async function tryProviderWithFailover(text, request_id, preferredProvider, sess
     }
   }
 
-  // Get ordered list of providers to try for new sessions
+  // An explicitly requested provider that the user has disabled is never silently substituted —
+  // fail cleanly so callers that run their own fallback (and label results by the provider they
+  // asked for, e.g. the securities valuation service) move on to their next choice instead of
+  // recording the wrong provider. Auto-selection (no preferred) simply skips disabled ones below.
+  // NB: keep the words "extension"/"connect"/"timeout" out of this message — the securities bridge
+  // classifies those as a global connection error and aborts its whole run instead of falling back.
+  if (preferredProvider && !isProviderEnabled(preferredProvider)) {
+    log('Background', 'info', `Requested provider ${preferredProvider} is disabled; not used.`);
+    return { success: false, error: `Provider ${preferredProvider} is disabled` };
+  }
+
+  // Get ordered list of enabled providers to try for new sessions
   let providersToTry = getOrderedProviders().filter(p =>
     p.selectors.textarea && p.selectors.textarea.length > 0 &&
+    isProviderEnabled(p.name) &&
     !triedProviders.includes(p.name)
   );
 
@@ -485,7 +564,14 @@ async function tryProviderWithFailover(text, request_id, preferredProvider, sess
   }
 
   if (providersToTry.length === 0) {
-    return { success: false, error: 'All providers failed or unavailable' };
+    // Distinguish "nothing left to try" from "the user switched everything off".
+    const anyEnabled = ProviderRegistry.getAll().some(p =>
+      isProviderEnabled(p.name) && p.selectors.textarea && p.selectors.textarea.length > 0
+    );
+    const error = anyEnabled
+      ? 'All providers failed or unavailable'
+      : 'All providers are disabled';
+    return { success: false, error };
   }
 
   const providerToTry = providersToTry[0];
@@ -505,7 +591,7 @@ async function tryProviderWithFailover(text, request_id, preferredProvider, sess
         text,
         attachments,
         debugLogging,
-        usePasteInput,
+        usePasteInput: usePasteFor(provider.name),
         domStabilizeMs,
         provider: {
           name: provider.name,
@@ -524,7 +610,7 @@ async function tryProviderWithFailover(text, request_id, preferredProvider, sess
       return tryProviderWithFailover(text, request_id, null, null, ephemeral, attachments, [...triedProviders, provider.name]);
     }
 
-    log('Background', 'info', `Provider ${provider.name} response: ${response.success ? 'success' : 'failed'}`);
+    log('Background', 'info', `Provider ${provider.name} response: ${response.success ? 'success (' + (response.text ? response.text.length : 0) + ' chars)' : 'failed: ' + response.error}`);
 
     if (response.success) {
       // Update session URL after successful prompt
@@ -597,9 +683,22 @@ async function handlePrompt(message) {
     response.error = result.error;
   }
 
-  // For WebSocket, send via ws
+  // For WebSocket, send the result back to the API/bridge.
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(response));
+    const payload = JSON.stringify(response);
+    log('Background', 'info',
+      `Sending response to API: request_id=${request_id}, success=${response.success}, provider=${response.provider || 'none'}, textLen=${response.text ? response.text.length : 0}, payloadBytes=${payload.length}${response.error ? `, error="${response.error}"` : ''}`);
+    try {
+      ws.send(payload);
+      log('Background', 'info', `Response sent for request_id=${request_id}`);
+    } catch (e) {
+      log('Background', 'error', `ws.send failed for request_id=${request_id}: ${e.message}`);
+    }
+  } else {
+    // The capture may have succeeded but there's nowhere to send it — surface this loudly, it
+    // otherwise looks like the whole run silently vanished.
+    log('Background', 'warn',
+      `Cannot send response for request_id=${request_id}: WebSocket not open (readyState=${ws ? ws.readyState : 'no ws'}). Response dropped (success=${response.success}, textLen=${response.text ? response.text.length : 0}).`);
   }
 
   // Return response for native messaging
@@ -643,8 +742,10 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
         providerOrder: providerOrder,
         debugLogging: debugLogging,
         keepTabsOpen: keepTabsOpen,
-        usePasteInput: usePasteInput,
+        hideTabs: hideTabs,
+        pasteProviders: resolvedPasteProviders(),
         domStabilizeMs: domStabilizeMs,
+        disabledProviders: disabledProviders,
         provider: activeProvider ? activeProvider.name : null,
         availableProviders: ProviderRegistry.getAll().map(p => ({
           name: p.name,
@@ -663,9 +764,20 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     keepTabsOpen = message.value;
     browser.storage.local.set({ keepTabsOpen });
     sendResponse({ success: true });
-  } else if (message.type === 'setUsePasteInput') {
-    usePasteInput = message.value;
-    browser.storage.local.set({ usePasteInput });
+  } else if (message.type === 'setHideTabs') {
+    hideTabs = message.value;
+    browser.storage.local.set({ hideTabs });
+    sendResponse({ success: true });
+  } else if (message.type === 'setProviderPaste') {
+    const { name, paste } = message;
+    if (pasteProviders === null) pasteProviders = ProviderRegistry.getAll().map(p => p.name);
+    if (paste) {
+      if (!pasteProviders.includes(name)) pasteProviders = [...pasteProviders, name];
+    } else {
+      pasteProviders = pasteProviders.filter(n => n !== name);
+    }
+    browser.storage.local.set({ pasteProviders });
+    log('Background', 'info', `Provider ${name} input mode set to ${paste ? 'paste' : 'type'}`);
     sendResponse({ success: true });
   } else if (message.type === 'setDomStabilizeMs') {
     domStabilizeMs = message.value;
@@ -675,9 +787,11 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     useNativeMessaging = message.value;
     browser.storage.local.set({ useNativeMessaging });
     // Disconnect current connections and reconnect with new method
-    if (ws) ws.close();
+    if (reconnectTimeout) { clearTimeout(reconnectTimeout); reconnectTimeout = null; }
+    reconnectAttempts = 0;
+    closeWs();
     if (nativePort) {
-      nativePort.disconnect();
+      try { nativePort.disconnect(); } catch (e) {}
       nativePort = null;
     }
     if (useNativeMessaging) {
@@ -689,7 +803,9 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
   } else if (message.type === 'setPort') {
     wsPort = message.port;
     browser.storage.local.set({ wsPort });
-    if (ws) ws.close();
+    if (reconnectTimeout) { clearTimeout(reconnectTimeout); reconnectTimeout = null; }
+    reconnectAttempts = 0;
+    closeWs();
     connect();
     sendResponse({ success: true });
   } else if (message.type === 'setFastReconnect') {
@@ -700,10 +816,29 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     providerOrder = message.order;
     browser.storage.local.set({ providerOrder });
     sendResponse({ success: true });
+  } else if (message.type === 'setProviderEnabled') {
+    const { name, enabled } = message;
+    if (enabled) {
+      disabledProviders = disabledProviders.filter(n => n !== name);
+    } else if (!disabledProviders.includes(name)) {
+      disabledProviders = [...disabledProviders, name];
+    }
+    browser.storage.local.set({ disabledProviders });
+    log('Background', 'info', `Provider ${name} ${enabled ? 'enabled' : 'disabled'}`);
+    sendResponse({ success: true });
   } else if (message.type === 'reconnect') {
-    if (ws) ws.close();
+    // Force a clean reconnect on whichever transport is selected. Tear down any
+    // existing socket/port and pending retry first so we don't stack connections.
+    if (reconnectTimeout) { clearTimeout(reconnectTimeout); reconnectTimeout = null; }
     reconnectAttempts = 0;
-    connect();
+    closeWs();
+    if (nativePort) { try { nativePort.disconnect(); } catch (e) {} nativePort = null; }
+    updateConnectionState('disconnected');
+    if (useNativeMessaging) {
+      connectNative();
+    } else {
+      connect();
+    }
     sendResponse({ success: true });
   } else if (message.type === 'detectProvider') {
     detectActiveProvider().then(result => {

@@ -4,12 +4,14 @@ const providerList = document.getElementById('provider-list');
 const portInput = document.getElementById('port');
 const saveBtn = document.getElementById('save-btn');
 const reconnectBtn = document.getElementById('reconnect-btn');
+const reconnectBtnWs = document.getElementById('reconnect-btn-ws');
+const connectionDetail = document.getElementById('connection-detail');
 const fastReconnectToggle = document.getElementById('fast-reconnect');
 const nativeMessagingToggle = document.getElementById('native-messaging');
 const websocketSettings = document.getElementById('websocket-settings');
 const debugLoggingToggle = document.getElementById('debug-logging');
 const keepTabsOpenToggle = document.getElementById('keep-tabs-open');
-const usePasteInputToggle = document.getElementById('use-paste-input');
+const hideTabsToggle = document.getElementById('hide-tabs');
 const domStabilizeMsInput = document.getElementById('dom-stabilize-ms');
 const logsContainer = document.getElementById('logs-container');
 const clearLogsBtn = document.getElementById('clear-logs-btn');
@@ -31,6 +33,10 @@ const providerColors = {
 
 let draggedItem = null;
 let autoScroll = true;
+let disabledProviders = []; // provider names switched off (mirrors background state)
+let pasteProviders = []; // provider names that paste the whole prompt at once (mirrors background state)
+let currentPort = 8760; // WebSocket port the background is targeting (mirrors background state)
+let currentUseNative = true; // whether native messaging is the preferred transport
 
 // Logging utility for popup
 function logToBackground(level, ...args) {
@@ -156,9 +162,32 @@ function updateStatus(state) {
   };
 
   statusText.textContent = statusLabels[state] || state;
+  renderConnectionDetail();
 }
 
-function renderProviderList(providers, order) {
+// Show what the background is actually trying to reach, so a wrong port (e.g. an
+// old 8765 pointing at something that isn't the bridge) is visible at a glance.
+function renderConnectionDetail() {
+  if (!connectionDetail) return;
+  connectionDetail.textContent = currentUseNative
+    ? `Native messaging (WebSocket fallback: localhost:${currentPort})`
+    : `WebSocket: localhost:${currentPort}`;
+}
+
+// Trigger a reconnect and give brief feedback on the clicked button.
+function triggerReconnect(btn) {
+  browser.runtime.sendMessage({ type: 'reconnect' }).catch(() => {});
+  if (!btn) return;
+  const prevText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Reconnecting…';
+  setTimeout(() => {
+    btn.disabled = false;
+    btn.textContent = prevText;
+  }, 1500);
+}
+
+function renderProviderList(providers, order, disabled = [], paste = []) {
   providerList.innerHTML = '';
 
   // Sort providers by saved order
@@ -171,9 +200,11 @@ function renderProviderList(providers, order) {
     return indexA - indexB;
   });
 
-  sortedProviders.forEach((provider, index) => {
+  sortedProviders.forEach((provider) => {
+    const enabled = !disabled.includes(provider.name);
+    const pasteOn = paste.includes(provider.name);
     const li = document.createElement('li');
-    li.className = 'provider-list-item';
+    li.className = 'provider-list-item' + (enabled ? '' : ' provider-disabled');
     li.draggable = true;
     li.dataset.provider = provider.name;
 
@@ -183,7 +214,18 @@ function renderProviderList(providers, order) {
         ${providerIcons[provider.name] || '?'}
       </div>
       <span class="provider-label">${provider.displayName}</span>
-      <span class="provider-rank">#${index + 1}</span>
+      <span class="provider-rank"></span>
+      <div class="provider-paste" title="Paste the whole prompt at once (on) or type it key-by-key (off)">
+        <span class="paste-icon">📋</span>
+        <div class="toggle">
+          <input type="checkbox" ${pasteOn ? 'checked' : ''}>
+          <span class="toggle-slider"></span>
+        </div>
+      </div>
+      <div class="toggle provider-toggle" title="Enable or disable this provider">
+        <input type="checkbox" ${enabled ? 'checked' : ''}>
+        <span class="toggle-slider"></span>
+      </div>
     `;
 
     // Drag events
@@ -194,8 +236,50 @@ function renderProviderList(providers, order) {
     li.addEventListener('dragleave', handleDragLeave);
     li.addEventListener('drop', handleDrop);
 
+    // Per-provider paste toggle — keep its interactions from starting a drag on the row
+    const pasteWrap = li.querySelector('.provider-paste');
+    pasteWrap.draggable = false;
+    pasteWrap.addEventListener('mousedown', (e) => e.stopPropagation());
+    pasteWrap.addEventListener('click', (e) => e.stopPropagation());
+    const pasteInput = pasteWrap.querySelector('input');
+    pasteInput.addEventListener('change', () => {
+      handleProviderPasteToggle(provider.name, pasteInput.checked);
+    });
+
+    // Enable/disable toggle — keep its interactions from starting a drag on the row
+    const toggleWrap = li.querySelector('.provider-toggle');
+    toggleWrap.draggable = false;
+    toggleWrap.addEventListener('mousedown', (e) => e.stopPropagation());
+    toggleWrap.addEventListener('click', (e) => e.stopPropagation());
+    const toggleInput = toggleWrap.querySelector('input');
+    toggleInput.addEventListener('change', () => {
+      handleProviderToggle(provider.name, li, toggleInput.checked);
+    });
+
     providerList.appendChild(li);
   });
+
+  updateRankNumbers();
+}
+
+function handleProviderToggle(name, li, enabled) {
+  li.classList.toggle('provider-disabled', !enabled);
+  if (enabled) {
+    disabledProviders = disabledProviders.filter(n => n !== name);
+  } else if (!disabledProviders.includes(name)) {
+    disabledProviders.push(name);
+  }
+  updateRankNumbers();
+  browser.runtime.sendMessage({ type: 'setProviderEnabled', name, enabled });
+}
+
+function handleProviderPasteToggle(name, paste) {
+  if (paste) {
+    if (!pasteProviders.includes(name)) pasteProviders.push(name);
+  } else {
+    pasteProviders = pasteProviders.filter(n => n !== name);
+  }
+  browser.runtime.sendMessage({ type: 'setProviderPaste', name, paste });
 }
 
 function handleDragStart(e) {
@@ -254,9 +338,18 @@ function handleDrop(e) {
 
 function updateRankNumbers() {
   const items = providerList.querySelectorAll('.provider-list-item');
-  items.forEach((item, index) => {
-    const rank = item.querySelector('.provider-rank');
-    if (rank) rank.textContent = `#${index + 1}`;
+  let rank = 0;
+  items.forEach((item) => {
+    const rankEl = item.querySelector('.provider-rank');
+    if (!rankEl) return;
+    if (item.classList.contains('provider-disabled')) {
+      rankEl.textContent = 'Off';
+      rankEl.classList.add('off');
+    } else {
+      rank += 1;
+      rankEl.textContent = `#${rank}`;
+      rankEl.classList.remove('off');
+    }
   });
 }
 
@@ -272,18 +365,22 @@ function updateWebsocketSettingsVisibility(useNative) {
 
 // Get initial status
 browser.runtime.sendMessage({ type: 'getStatus' }).then(response => {
+  currentPort = response.port;
+  currentUseNative = response.useNativeMessaging !== false;
   updateStatus(response.state);
   portInput.value = response.port;
   fastReconnectToggle.checked = response.fastReconnect !== false;
   nativeMessagingToggle.checked = response.useNativeMessaging !== false;
   debugLoggingToggle.checked = response.debugLogging === true;
   keepTabsOpenToggle.checked = response.keepTabsOpen === true;
-  usePasteInputToggle.checked = response.usePasteInput === true;
+  hideTabsToggle.checked = response.hideTabs === true;
   domStabilizeMsInput.value = response.domStabilizeMs || 3000;
   updateWebsocketSettingsVisibility(response.useNativeMessaging !== false);
 
   if (response.availableProviders) {
-    renderProviderList(response.availableProviders, response.providerOrder || []);
+    disabledProviders = response.disabledProviders || [];
+    pasteProviders = response.pasteProviders || [];
+    renderProviderList(response.availableProviders, response.providerOrder || [], disabledProviders, pasteProviders);
   }
 });
 
@@ -291,14 +388,17 @@ browser.runtime.sendMessage({ type: 'getStatus' }).then(response => {
 saveBtn.addEventListener('click', () => {
   const port = parseInt(portInput.value, 10);
   if (port >= 1 && port <= 65535) {
+    currentPort = port;
+    renderConnectionDetail();
     browser.runtime.sendMessage({ type: 'setPort', port });
   }
 });
 
-// Reconnect
-reconnectBtn.addEventListener('click', () => {
-  browser.runtime.sendMessage({ type: 'reconnect' });
-});
+// Reconnect (main tab button, plus the one in WebSocket settings)
+reconnectBtn.addEventListener('click', () => triggerReconnect(reconnectBtn));
+if (reconnectBtnWs) {
+  reconnectBtnWs.addEventListener('click', () => triggerReconnect(reconnectBtnWs));
+}
 
 // Fast reconnect toggle
 fastReconnectToggle.addEventListener('change', () => {
@@ -308,6 +408,8 @@ fastReconnectToggle.addEventListener('change', () => {
 // Native messaging toggle
 nativeMessagingToggle.addEventListener('change', () => {
   const useNative = nativeMessagingToggle.checked;
+  currentUseNative = useNative;
+  renderConnectionDetail();
   browser.runtime.sendMessage({ type: 'setUseNativeMessaging', value: useNative });
   updateWebsocketSettingsVisibility(useNative);
 });
@@ -322,9 +424,9 @@ keepTabsOpenToggle.addEventListener('change', () => {
   browser.runtime.sendMessage({ type: 'setKeepTabsOpen', value: keepTabsOpenToggle.checked });
 });
 
-// Use paste input toggle
-usePasteInputToggle.addEventListener('change', () => {
-  browser.runtime.sendMessage({ type: 'setUsePasteInput', value: usePasteInputToggle.checked });
+// Hide tabs toggle
+hideTabsToggle.addEventListener('change', () => {
+  browser.runtime.sendMessage({ type: 'setHideTabs', value: hideTabsToggle.checked });
 });
 
 // DOM stabilize ms input

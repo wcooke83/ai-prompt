@@ -11,6 +11,7 @@ class Provider(str, Enum):
     chatgpt = "chatgpt"
     claude = "claude"
     grok = "grok"
+    deepseek = "deepseek"
 
 
 class Attachment(BaseModel):

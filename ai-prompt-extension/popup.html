@@ -96,6 +96,22 @@
     .status-text {
       color: #333;
     }
+    .reconnect-inline {
+      flex: 0 0 auto;
+      margin-left: auto;
+      padding: 4px 10px;
+      font-size: 12px;
+    }
+    .reconnect-inline:disabled,
+    .reconnect-inline:disabled:hover {
+      background-color: #93c5fd;
+      cursor: default;
+    }
+    .connection-detail {
+      margin-top: 6px;
+      font-size: 11px;
+      color: #9ca3af;
+    }
     .provider-row {
       display: flex;
       align-items: center;
@@ -261,6 +277,35 @@
       font-size: 11px;
       color: #9ca3af;
       margin-left: 8px;
+      min-width: 24px;
+      text-align: right;
+    }
+    .provider-list-item .provider-rank.off {
+      color: #ef4444;
+      font-style: italic;
+    }
+    .provider-list-item .provider-toggle {
+      margin-left: 10px;
+      flex-shrink: 0;
+    }
+    .provider-list-item .provider-paste {
+      margin-left: 10px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .provider-list-item .provider-paste .paste-icon {
+      font-size: 12px;
+      line-height: 1;
+      opacity: 0.7;
+    }
+    .provider-list-item.provider-disabled {
+      opacity: 0.6;
+    }
+    .provider-list-item.provider-disabled .provider-label {
+      color: #9ca3af;
+      text-decoration: line-through;
     }
     .provider-hint {
       font-size: 11px;
@@ -341,13 +386,15 @@
       <div class="status-row">
         <div id="status-indicator" class="status-indicator disconnected"></div>
         <span id="status-text" class="status-text">Disconnected</span>
+        <button id="reconnect-btn" class="reconnect-inline">Reconnect</button>
       </div>
+      <div id="connection-detail" class="connection-detail"></div>
     </div>
 
     <div class="section">
       <div class="section-label">Provider Priority (drag to reorder)</div>
       <ul id="provider-list" class="provider-list"></ul>
-      <div class="provider-hint">First available provider is used. Failed providers failover to next.</div>
+      <div class="provider-hint">First enabled provider is used; failed ones failover to the next. Switch a provider off to exclude it from selection and failover. The 📋 toggle pastes the whole prompt in one go (on, faster) or types it key-by-key (off).</div>
     </div>
   </div>
 
@@ -365,11 +412,11 @@
       <div id="websocket-settings">
         <div class="section-label" style="margin-top: 12px;">WebSocket Port</div>
         <div class="port-row">
-          <input type="number" id="port" min="1" max="65535" value="8765">
+          <input type="number" id="port" min="1" max="65535" value="8760">
         </div>
         <div class="buttons">
           <button id="save-btn">Save</button>
-          <button id="reconnect-btn" class="secondary">Reconnect</button>
+          <button id="reconnect-btn-ws" class="secondary">Reconnect</button>
         </div>
         <div class="toggle-row">
           <label for="fast-reconnect">Fast reconnect</label>
@@ -393,13 +440,15 @@
       <div class="provider-hint">When off, tabs close automatically after response</div>
 
       <div class="toggle-row" style="margin-top: 16px;">
-        <label for="use-paste-input">Use paste instead of keystrokes</label>
+        <label for="hide-tabs">Hide automation tabs</label>
         <div class="toggle">
-          <input type="checkbox" id="use-paste-input">
+          <input type="checkbox" id="hide-tabs">
           <span class="toggle-slider"></span>
         </div>
       </div>
-      <div class="provider-hint">When on, text is pasted directly (faster but may not work on all sites)</div>
+      <div class="provider-hint">When on, provider tabs open in the background and are hidden from the tab bar (then closed afterwards unless "Keep tabs open" is on). May not work with every provider — a hidden tab can be throttled.</div>
+
+      <!-- Paste-vs-type is now a per-provider toggle in the Provider Priority list (the 📋 switch). -->
 
       <div class="section-label" style="margin-top: 16px;">DOM Stability Wait (ms)</div>
       <div class="port-row">

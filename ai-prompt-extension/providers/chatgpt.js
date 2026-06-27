@@ -21,7 +21,10 @@ const ChatGPTProvider = {
       'form button[type="submit"]'
     ],
     responseContainer: [
-      'article[data-testid^="conversation-turn-"]'
+      // ChatGPT renders each turn as <section data-testid="conversation-turn-N"> in current
+      // builds (older builds used <article>). Match tag-agnostically on the data-testid so the
+      // container is found regardless of which wrapper element the live ChatGPT build ships.
+      '[data-testid^="conversation-turn-"]'
     ],
     streamingIndicator: [
       'button[aria-label="Stop generating"]',
@@ -70,8 +73,8 @@ const ChatGPTProvider = {
   findLatestAssistantResponse: function(document) {
     console.log('[ChatGPT] Finding latest assistant response...');
     
-    // Find all conversation turn articles
-    const articles = document.querySelectorAll('article[data-testid^="conversation-turn-"]');
+    // Find all conversation turns (tag-agnostic: current ChatGPT uses <section>, older <article>)
+    const articles = document.querySelectorAll('[data-testid^="conversation-turn-"]');
     console.log('[ChatGPT] Total conversation turns found:', articles.length);
     
     if (articles.length === 0) {
@@ -173,10 +176,22 @@ const ChatGPTProvider = {
     console.log('[ChatGPT] ═══════════ EXTRACTING RESPONSE TEXT ═══════════');
     console.log('[ChatGPT] Container:', container.tagName, container.getAttribute('data-testid'));
 
+    // The conversation turn now wraps more than the assistant message: action buttons and,
+    // increasingly, a sponsored ad block ("People Data Labs / Sponsored / ...") that carries its
+    // own <p> elements. Extracting <p>/<pre> from the whole turn concatenates that ad text onto the
+    // answer and corrupts JSON responses. Narrow to the actual assistant message markdown first,
+    // falling back progressively so a future DOM tweak degrades instead of breaking.
+    const scope = container.querySelector('[data-message-author-role="assistant"] .markdown')
+      || container.querySelector('[data-message-author-role="assistant"]')
+      || container;
+    if (scope !== container) {
+      console.log('[ChatGPT] Narrowed extraction scope to assistant message:', scope.className || scope.tagName);
+    }
+
     // Method 1: Extract code blocks directly from DOM
     // Clicking "Copy code" button doesn't work because synthetic events aren't trusted
     // and the Clipboard API blocks untrusted event access
-    const codeBlocks = container.querySelectorAll('pre code');
+    const codeBlocks = scope.querySelectorAll('pre code');
     console.log('[ChatGPT] Found', codeBlocks.length, 'code blocks');
 
     if (codeBlocks.length > 0) {
@@ -207,7 +222,7 @@ const ChatGPTProvider = {
 
     // Method 2: No code blocks, extract text from paragraphs
     console.log('[ChatGPT] No code blocks, extracting from <p> elements...');
-    const paragraphs = container.querySelectorAll('p');
+    const paragraphs = scope.querySelectorAll('p');
     console.log('[ChatGPT] Found', paragraphs.length, '<p> elements');
 
     const textParts = [];
