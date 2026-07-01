@@ -1,5 +1,14 @@
 // Generic content script - receives provider config from background
 
+const browserAPI = typeof browser !== 'undefined' ? browser : chrome;
+
+// Lets background.js's injectContentScripts() detect that this tab already has the bundle
+// loaded (declarative manifest content_scripts injects it on page load; background.js also
+// explicitly re-injects after creating a tab). Without this check, the explicit re-injection
+// redeclares every top-level const/class in the bundle a second time, throwing
+// "Identifier '...' has already been declared" for each one.
+window.__aiPromptContentLoaded = true;
+
 let currentProvider = null;
 let DEBUG = false; // Will be set per-request from background
 let USE_PASTE = false; // Will be set per-request from background
@@ -2002,7 +2011,7 @@ function getLatestResponseElement(selectors) {
 }
 
 // Listen for messages from background script
-browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
+browserAPI.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('[AI-Automator] Received message:', message.type);
   if (message.type === 'executePrompt') {
     console.log('[AI-Automator] Executing prompt for provider:', message.provider?.name);

@@ -1,5 +1,68 @@
 // Background script - Provider-agnostic WebSocket manager with Native Messaging support
 
+const browserAPI = typeof browser !== 'undefined' ? browser : chrome;
+
+// Chrome's MV3 service worker is suspended after ~30s idle, which would silently drop a WebSocket
+// owned directly by it. Where the offscreen API exists (Chrome), the socket instead lives in an
+// offscreen document (offscreen.js) that Chrome does not subject to that suspension, and this
+// script drives it via runtime messages. Firefox has no `offscreen` API and its background page
+// is persistent (never unloads), so it keeps owning `ws` directly — every branch below collapses
+// to today's behaviour there.
+const HAS_OFFSCREEN = !!browserAPI.offscreen;
+let creatingOffscreen = null;
+
+async function ensureOffscreenDocument() {
+  if (!HAS_OFFSCREEN) return;
+  if (creatingOffscreen) {
+    await creatingOffscreen;
+    return;
+  }
+  creatingOffscreen = browserAPI.offscreen
+    .createDocument({
+      url: 'offscreen.html',
+      reasons: ['WEB_RTC'],
+      justification:
+        'Keeps the WebSocket to the local ai-prompt-api bridge alive across service-worker ' +
+        'restarts (MV3 suspends the worker after ~30s idle, which would otherwise drop it).',
+    })
+    .catch((e) => {
+      if (!/single offscreen document|already exists/i.test((e && e.message) || '')) {
+        log('Background', 'error', 'Failed to create offscreen document:', e.message);
+      }
+    });
+  await creatingOffscreen;
+  creatingOffscreen = null;
+}
+
+// Whether the transport (offscreen-hosted on Chrome, direct `ws` on Firefox) is currently open.
+// Async because the Chrome path has to ask the offscreen document for its live status rather than
+// trust any local mirror — the service worker's own in-memory state resets on every restart, but
+// the offscreen document (and its socket) persists across those restarts.
+async function isWsOpen() {
+  if (HAS_OFFSCREEN) {
+    try {
+      const status = await browserAPI.runtime.sendMessage({ target: 'offscreen', type: 'query-status' });
+      return !!(status && status.open);
+    } catch (e) {
+      return false; // no offscreen document listening yet -> definitely not open
+    }
+  }
+  return !!(ws && ws.readyState === WebSocket.OPEN);
+}
+
+// Fire-and-forget send. On Chrome this relays through the offscreen document; on Firefox it's a
+// direct ws.send. Callers should confirm `await isWsOpen()` first (mirrors the previous inline
+// `ws.readyState === WebSocket.OPEN` guards).
+function wsSend(payload) {
+  if (HAS_OFFSCREEN) {
+    browserAPI.runtime.sendMessage({ target: 'offscreen', type: 'send', payload }).catch((e) => {
+      log('Background', 'error', `Failed to relay send to offscreen document: ${e.message}`);
+    });
+    return;
+  }
+  ws.send(payload);
+}
+
 // ============ Centralized Logging System ============
 const LOG_BUFFER_SIZE = 3000; // generous so a full prompt→response run (with heartbeats/diagnostics) isn't truncated
 const logBuffer = [];
@@ -23,7 +86,7 @@ function log(source, level, ...args) {
   }
 
   // Notify popup if open
-  browser.runtime.sendMessage({
+  browserAPI.runtime.sendMessage({
     type: 'newLog',
     log: logEntry
   }).catch(() => {});
@@ -82,7 +145,7 @@ let disabledProviders = []; // Provider names the user switched off — never au
 let sessions = {};
 
 // Load saved sessions from storage
-browser.storage.local.get('sessions').then(result => {
+browserAPI.storage.local.get('sessions').then(result => {
   if (result.sessions) {
     sessions = result.sessions;
   }
@@ -90,7 +153,7 @@ browser.storage.local.get('sessions').then(result => {
 
 // Save sessions to storage
 function saveSessions() {
-  browser.storage.local.set({ sessions });
+  browserAPI.storage.local.set({ sessions });
 }
 
 // Generate unique session ID
@@ -158,7 +221,7 @@ function connectNative() {
 
   try {
     log('Background', 'info', 'Connecting to native host...');
-    nativePort = browser.runtime.connectNative(NATIVE_HOST_NAME);
+    nativePort = browserAPI.runtime.connectNative(NATIVE_HOST_NAME);
 
     nativePort.onMessage.addListener((message) => {
       log('Background', 'info', 'Native message received:', message.type);
@@ -176,7 +239,7 @@ function connectNative() {
     });
 
     nativePort.onDisconnect.addListener((p) => {
-      const error = p.error || browser.runtime.lastError;
+      const error = p.error || browserAPI.runtime.lastError;
       log('Background', 'warn', 'Native host disconnected:', error?.message || 'unknown');
       nativePort = null;
       updateConnectionState('disconnected');
@@ -200,7 +263,7 @@ function connectNative() {
 // ============ Load Settings & Initialize ============
 
 // Load saved settings from storage
-browser.storage.local.get(['wsPort', 'fastReconnect', 'providerOrder', 'useNativeMessaging', 'debugLogging', 'keepTabsOpen', 'hideTabs', 'usePasteInput', 'pasteProviders', 'domStabilizeMs', 'disabledProviders']).then(result => {
+browserAPI.storage.local.get(['wsPort', 'fastReconnect', 'providerOrder', 'useNativeMessaging', 'debugLogging', 'keepTabsOpen', 'hideTabs', 'usePasteInput', 'pasteProviders', 'domStabilizeMs', 'disabledProviders']).then(result => {
   if (result.wsPort) {
     wsPort = result.wsPort;
   }
@@ -227,11 +290,11 @@ browser.storage.local.get(['wsPort', 'fastReconnect', 'providerOrder', 'useNativ
   } else if (result.usePasteInput !== undefined) {
     // Migrate the old single global toggle: on -> every provider pastes, off -> every provider types.
     pasteProviders = result.usePasteInput ? ProviderRegistry.getAll().map(p => p.name) : [];
-    browser.storage.local.set({ pasteProviders });
+    browserAPI.storage.local.set({ pasteProviders });
   } else {
     // No saved preference -> default every provider to paste (one-shot, fast).
     pasteProviders = ProviderRegistry.getAll().map(p => p.name);
-    browser.storage.local.set({ pasteProviders });
+    browserAPI.storage.local.set({ pasteProviders });
   }
   if (result.domStabilizeMs !== undefined) {
     domStabilizeMs = result.domStabilizeMs;
@@ -250,7 +313,7 @@ browser.storage.local.get(['wsPort', 'fastReconnect', 'providerOrder', 'useNativ
 
 function updateConnectionState(state) {
   connectionState = state;
-  browser.runtime.sendMessage({
+  browserAPI.runtime.sendMessage({
     type: 'connectionState',
     state,
     provider: activeProvider ? activeProvider.name : null
@@ -260,6 +323,10 @@ function updateConnectionState(state) {
 // Detach handlers and close the current socket so its onclose doesn't fire a
 // stray scheduleReconnect() that races with a fresh connect() and leaks sockets.
 function closeWs() {
+  if (HAS_OFFSCREEN) {
+    browserAPI.runtime.sendMessage({ target: 'offscreen', type: 'disconnect' }).catch(() => {});
+    return;
+  }
   if (ws) {
     ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null;
     try { ws.close(); } catch (e) {}
@@ -268,6 +335,17 @@ function closeWs() {
 }
 
 function connect() {
+  if (HAS_OFFSCREEN) {
+    // Fire-and-forget: creating/telling the offscreen doc to connect is idempotent (it no-ops if
+    // already open/connecting), so it's safe to call this on every service-worker wake.
+    ensureOffscreenDocument().then(() => {
+      browserAPI.runtime.sendMessage({ target: 'offscreen', type: 'connect', wsPort, fastReconnect }).catch((e) => {
+        log('Background', 'error', `Failed to reach offscreen document: ${e.message}`);
+      });
+    });
+    return;
+  }
+
   // Already connected or mid-handshake — don't open a second socket.
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
@@ -328,7 +406,7 @@ function scheduleReconnect() {
 // Find tabs matching any provider pattern
 async function findProviderTabs() {
   const allPatterns = ProviderRegistry.getAll().flatMap(p => p.hostPatterns);
-  const tabs = await browser.tabs.query({ url: allPatterns });
+  const tabs = await browserAPI.tabs.query({ url: allPatterns });
   return tabs;
 }
 
@@ -351,7 +429,7 @@ async function detectActiveProvider() {
       for (const pattern of provider.hostPatterns) {
         if (ProviderRegistry.urlMatchesPattern(tab.url, pattern)) {
           activeProvider = provider;
-          browser.runtime.sendMessage({
+          browserAPI.runtime.sendMessage({
             type: 'providerChanged',
             provider: provider.name,
             displayName: provider.displayName
@@ -372,11 +450,59 @@ async function detectActiveProvider() {
 async function applyTabVisibility(tabId) {
   if (!hideTabs || !tabId) return;
   try {
-    if (browser.tabs.hide) {
-      await browser.tabs.hide(tabId);
+    if (browserAPI.tabs.hide) {
+      await browserAPI.tabs.hide(tabId);
     }
   } catch (e) {
     console.log('tabs.hide failed:', e.message);
+  }
+}
+
+// Inject the content-script bundle into a tab. MV3/Chrome has no tabs.executeScript, so prefer
+// scripting.executeScript (one call, ordered files) when present; MV2/Firefox falls back to the
+// old per-file tabs.executeScript loop.
+const CONTENT_SCRIPT_FILES = [
+  'logging.js',
+  'providers/index.js',
+  'providers/chatgpt.js',
+  'providers/grok.js',
+  'providers/claude.js',
+  'providers/deepseek.js',
+  'content.js'
+];
+
+// The manifest's declarative content_scripts already injects the bundle when the tab
+// navigates to a matching URL, so by the time we get here (tab load "complete") it's
+// normally already present. Probe for content.js's __aiPromptContentLoaded marker first —
+// injecting the bundle a second time redeclares every top-level const/class in it, which
+// throws "Identifier '...' has already been declared" for each one instead of no-op'ing.
+async function isContentScriptLoaded(tabId) {
+  try {
+    if (browserAPI.scripting && browserAPI.scripting.executeScript) {
+      const results = await browserAPI.scripting.executeScript({
+        target: { tabId },
+        func: () => window.__aiPromptContentLoaded === true,
+      });
+      return results.some(r => r.result === true);
+    }
+    const results = await browserAPI.tabs.executeScript(tabId, {
+      code: 'window.__aiPromptContentLoaded === true',
+    });
+    return Array.isArray(results) && results.some(r => r === true);
+  } catch (e) {
+    return false; // tab not ready / no frame yet — treat as not loaded, let injection proceed
+  }
+}
+
+async function injectContentScripts(tabId) {
+  if (await isContentScriptLoaded(tabId)) return;
+
+  if (browserAPI.scripting && browserAPI.scripting.executeScript) {
+    await browserAPI.scripting.executeScript({ target: { tabId }, files: CONTENT_SCRIPT_FILES });
+    return;
+  }
+  for (const file of CONTENT_SCRIPT_FILES) {
+    await browserAPI.tabs.executeScript(tabId, { file });
   }
 }
 
@@ -389,18 +515,18 @@ async function createProviderTab(providerName) {
 
   const newSessionId = generateSessionId();
   const newChatUrl = getNewChatUrl(providerName);
-  const newTab = await browser.tabs.create({ url: newChatUrl, active: !hideTabs });
+  const newTab = await browserAPI.tabs.create({ url: newChatUrl, active: !hideTabs });
   await applyTabVisibility(newTab.id);
 
   // Wait for page to load completely
   await new Promise(resolve => {
     const listener = (tabId, info) => {
       if (tabId === newTab.id && info.status === 'complete') {
-        browser.tabs.onUpdated.removeListener(listener);
+        browserAPI.tabs.onUpdated.removeListener(listener);
         resolve();
       }
     };
-    browser.tabs.onUpdated.addListener(listener);
+    browserAPI.tabs.onUpdated.addListener(listener);
   });
 
   // Give page extra time to initialize
@@ -408,13 +534,7 @@ async function createProviderTab(providerName) {
 
   // Inject content script into the new tab
   try {
-    await browser.tabs.executeScript(newTab.id, { file: 'logging.js' });
-    await browser.tabs.executeScript(newTab.id, { file: 'providers/index.js' });
-    await browser.tabs.executeScript(newTab.id, { file: 'providers/chatgpt.js' });
-    await browser.tabs.executeScript(newTab.id, { file: 'providers/grok.js' });
-    await browser.tabs.executeScript(newTab.id, { file: 'providers/claude.js' });
-    await browser.tabs.executeScript(newTab.id, { file: 'providers/deepseek.js' });
-    await browser.tabs.executeScript(newTab.id, { file: 'content.js' });
+    await injectContentScripts(newTab.id);
   } catch (e) {
     console.log('Content script injection:', e.message);
   }
@@ -442,30 +562,30 @@ async function getOrCreateSessionTab(sessionId, preferredProvider) {
 
     // Check if tab still exists
     try {
-      const tab = await browser.tabs.get(session.tabId);
+      const tab = await browserAPI.tabs.get(session.tabId);
       if (tab) {
         // Tab exists — focus it (or keep it hidden when hideTabs is on)
         if (hideTabs) {
           await applyTabVisibility(tab.id);
         } else {
-          await browser.tabs.update(tab.id, { active: true });
+          await browserAPI.tabs.update(tab.id, { active: true });
         }
         return { tab, provider, sessionId, isNew: false };
       }
     } catch (e) {
       // Tab was closed, try to restore from URL
       if (session.url) {
-        const newTab = await browser.tabs.create({ url: session.url, active: !hideTabs });
+        const newTab = await browserAPI.tabs.create({ url: session.url, active: !hideTabs });
         await applyTabVisibility(newTab.id);
         // Wait for page to load
         await new Promise(resolve => {
           const listener = (tabId, info) => {
             if (tabId === newTab.id && info.status === 'complete') {
-              browser.tabs.onUpdated.removeListener(listener);
+              browserAPI.tabs.onUpdated.removeListener(listener);
               resolve();
             }
           };
-          browser.tabs.onUpdated.addListener(listener);
+          browserAPI.tabs.onUpdated.addListener(listener);
         });
         // Update session with new tab ID
         sessions[sessionId].tabId = newTab.id;
@@ -482,7 +602,7 @@ async function getOrCreateSessionTab(sessionId, preferredProvider) {
 
 // Update session URL after conversation starts
 function updateSessionUrl(sessionId, tabId) {
-  browser.tabs.get(tabId).then(tab => {
+  browserAPI.tabs.get(tabId).then(tab => {
     if (sessions[sessionId] && tab.url !== sessions[sessionId].url) {
       sessions[sessionId].url = tab.url;
       saveSessions();
@@ -503,7 +623,7 @@ async function tryProviderWithFailover(text, request_id, preferredProvider, sess
         const result = await getOrCreateSessionTab(session_id, sessionProvider.name);
         const { tab, provider, sessionId } = result;
 
-        const response = await browser.tabs.sendMessage(tab.id, {
+        const response = await browserAPI.tabs.sendMessage(tab.id, {
           type: 'executePrompt',
           request_id,
           text,
@@ -585,7 +705,7 @@ async function tryProviderWithFailover(text, request_id, preferredProvider, sess
     // Send prompt to content script
     let response;
     try {
-      response = await browser.tabs.sendMessage(tab.id, {
+      response = await browserAPI.tabs.sendMessage(tab.id, {
         type: 'executePrompt',
         request_id,
         text,
@@ -602,7 +722,7 @@ async function tryProviderWithFailover(text, request_id, preferredProvider, sess
       log('Background', 'error', `Provider ${provider.name} content script error: ${e.message}`);
       // Close the failed tab if it's ephemeral or new (unless keepTabsOpen is set)
       if ((ephemeral || result.isNew) && !keepTabsOpen) {
-        browser.tabs.remove(tab.id).catch(() => {});
+        browserAPI.tabs.remove(tab.id).catch(() => {});
         delete sessions[sessionId];
         saveSessions();
       }
@@ -621,7 +741,7 @@ async function tryProviderWithFailover(text, request_id, preferredProvider, sess
       // Close tab for ephemeral requests (unless keepTabsOpen is set)
       if (ephemeral && !keepTabsOpen && tab.id) {
         setTimeout(() => {
-          browser.tabs.remove(tab.id).catch(() => {});
+          browserAPI.tabs.remove(tab.id).catch(() => {});
           if (sessions[sessionId]) {
             delete sessions[sessionId];
             saveSessions();
@@ -643,7 +763,7 @@ async function tryProviderWithFailover(text, request_id, preferredProvider, sess
       console.log(`Provider ${provider.name} failed: ${response.error}`);
       // Close the failed tab if it's ephemeral or new (unless keepTabsOpen is set)
       if ((ephemeral || result.isNew) && !keepTabsOpen) {
-        browser.tabs.remove(tab.id).catch(() => {});
+        browserAPI.tabs.remove(tab.id).catch(() => {});
         delete sessions[sessionId];
         saveSessions();
       }
@@ -684,12 +804,12 @@ async function handlePrompt(message) {
   }
 
   // For WebSocket, send the result back to the API/bridge.
-  if (ws && ws.readyState === WebSocket.OPEN) {
+  if (await isWsOpen()) {
     const payload = JSON.stringify(response);
     log('Background', 'info',
       `Sending response to API: request_id=${request_id}, success=${response.success}, provider=${response.provider || 'none'}, textLen=${response.text ? response.text.length : 0}, payloadBytes=${payload.length}${response.error ? `, error="${response.error}"` : ''}`);
     try {
-      ws.send(payload);
+      wsSend(payload);
       log('Background', 'info', `Response sent for request_id=${request_id}`);
     } catch (e) {
       log('Background', 'error', `ws.send failed for request_id=${request_id}: ${e.message}`);
@@ -698,30 +818,59 @@ async function handlePrompt(message) {
     // The capture may have succeeded but there's nowhere to send it — surface this loudly, it
     // otherwise looks like the whole run silently vanished.
     log('Background', 'warn',
-      `Cannot send response for request_id=${request_id}: WebSocket not open (readyState=${ws ? ws.readyState : 'no ws'}). Response dropped (success=${response.success}, textLen=${response.text ? response.text.length : 0}).`);
+      `Cannot send response for request_id=${request_id}: WebSocket not open. Response dropped (success=${response.success}, textLen=${response.text ? response.text.length : 0}).`);
   }
 
   // Return response for native messaging
   return response;
 }
 
-function sendResponse(request_id, text, success, error = null, provider = null, session_id = null) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    const response = {
-      type: 'response',
-      request_id,
-      text,
-      success
-    };
-    if (error) response.error = error;
-    if (provider) response.provider = provider;
-    if (session_id) response.session_id = session_id;
-    ws.send(JSON.stringify(response));
-  }
+async function sendResponse(request_id, text, success, error = null, provider = null, session_id = null) {
+  if (!(await isWsOpen())) return;
+  const response = {
+    type: 'response',
+    request_id,
+    text,
+    success
+  };
+  if (error) response.error = error;
+  if (provider) response.provider = provider;
+  if (session_id) response.session_id = session_id;
+  wsSend(JSON.stringify(response));
 }
 
 // Handle messages from popup and content scripts
-browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
+browserAPI.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.target === 'offscreen') return true; // addressed to the offscreen document, not us
+
+  if (message.type === 'ws-status') {
+    // Status pushed by the offscreen document (Chrome only) — mirrors what the Firefox ws.onopen/
+    // onclose/onerror handlers below do inline for their own direct socket.
+    if (message.status === 'open') {
+      log('Background', 'info', 'WebSocket connected');
+      updateConnectionState('connected');
+      detectActiveProvider();
+    } else if (message.status === 'closed') {
+      log('Background', 'info', 'WebSocket disconnected');
+      updateConnectionState('disconnected');
+    } else if (message.status === 'error') {
+      log('Background', 'error', 'WebSocket error:', message.error);
+      updateConnectionState('error');
+    }
+    sendResponse({ success: true });
+    return true;
+  } else if (message.type === 'ws-message') {
+    // A prompt (or other) message the offscreen document received over its socket. Mirrors the
+    // try/catch the Firefox ws.onmessage handler below has inline for its own direct socket.
+    if (message.data && message.data.type === 'prompt') {
+      handlePrompt(message.data).catch((e) => {
+        log('Background', 'error', 'Error processing message:', e.message);
+      });
+    }
+    sendResponse({ success: true });
+    return true;
+  }
+
   if (message.type === 'log') {
     // Content script or other scripts sending logs
     log(message.source || 'Content', message.level || 'info', message.message);
@@ -756,17 +905,17 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   } else if (message.type === 'setDebugLogging') {
     debugLogging = message.value;
-    browser.storage.local.set({ debugLogging });
+    browserAPI.storage.local.set({ debugLogging });
     sendResponse({ success: true });
   } else if (message.type === 'getDebugLogging') {
     sendResponse({ debugLogging });
   } else if (message.type === 'setKeepTabsOpen') {
     keepTabsOpen = message.value;
-    browser.storage.local.set({ keepTabsOpen });
+    browserAPI.storage.local.set({ keepTabsOpen });
     sendResponse({ success: true });
   } else if (message.type === 'setHideTabs') {
     hideTabs = message.value;
-    browser.storage.local.set({ hideTabs });
+    browserAPI.storage.local.set({ hideTabs });
     sendResponse({ success: true });
   } else if (message.type === 'setProviderPaste') {
     const { name, paste } = message;
@@ -776,16 +925,16 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } else {
       pasteProviders = pasteProviders.filter(n => n !== name);
     }
-    browser.storage.local.set({ pasteProviders });
+    browserAPI.storage.local.set({ pasteProviders });
     log('Background', 'info', `Provider ${name} input mode set to ${paste ? 'paste' : 'type'}`);
     sendResponse({ success: true });
   } else if (message.type === 'setDomStabilizeMs') {
     domStabilizeMs = message.value;
-    browser.storage.local.set({ domStabilizeMs });
+    browserAPI.storage.local.set({ domStabilizeMs });
     sendResponse({ success: true });
   } else if (message.type === 'setUseNativeMessaging') {
     useNativeMessaging = message.value;
-    browser.storage.local.set({ useNativeMessaging });
+    browserAPI.storage.local.set({ useNativeMessaging });
     // Disconnect current connections and reconnect with new method
     if (reconnectTimeout) { clearTimeout(reconnectTimeout); reconnectTimeout = null; }
     reconnectAttempts = 0;
@@ -802,7 +951,7 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ success: true });
   } else if (message.type === 'setPort') {
     wsPort = message.port;
-    browser.storage.local.set({ wsPort });
+    browserAPI.storage.local.set({ wsPort });
     if (reconnectTimeout) { clearTimeout(reconnectTimeout); reconnectTimeout = null; }
     reconnectAttempts = 0;
     closeWs();
@@ -810,11 +959,14 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ success: true });
   } else if (message.type === 'setFastReconnect') {
     fastReconnect = message.value;
-    browser.storage.local.set({ fastReconnect });
+    browserAPI.storage.local.set({ fastReconnect });
+    if (HAS_OFFSCREEN) {
+      browserAPI.runtime.sendMessage({ target: 'offscreen', type: 'set-fast-reconnect', value: fastReconnect }).catch(() => {});
+    }
     sendResponse({ success: true });
   } else if (message.type === 'setProviderOrder') {
     providerOrder = message.order;
-    browser.storage.local.set({ providerOrder });
+    browserAPI.storage.local.set({ providerOrder });
     sendResponse({ success: true });
   } else if (message.type === 'setProviderEnabled') {
     const { name, enabled } = message;
@@ -823,7 +975,7 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } else if (!disabledProviders.includes(name)) {
       disabledProviders = [...disabledProviders, name];
     }
-    browser.storage.local.set({ disabledProviders });
+    browserAPI.storage.local.set({ disabledProviders });
     log('Background', 'info', `Provider ${name} ${enabled ? 'enabled' : 'disabled'}`);
     sendResponse({ success: true });
   } else if (message.type === 'reconnect') {
@@ -853,12 +1005,33 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 // Listen for tab updates to detect provider changes
-browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+browserAPI.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete') {
     detectActiveProvider();
   }
 });
 
-browser.tabs.onRemoved.addListener(() => {
+browserAPI.tabs.onRemoved.addListener(() => {
   detectActiveProvider();
 });
+
+// ============ MV3 Service Worker Watchdog ============
+// Chrome can terminate an idle service worker outright, which drops the native messaging port
+// (and, before offscreen.js existed, the WebSocket too — that now lives in an offscreen document
+// instead and survives worker restarts on its own, see ensureOffscreenDocument() above). alarms is
+// the one API guaranteed to wake a terminated worker back up, so it remains the backstop that
+// notices a dead native port, or an offscreen document that was never created / lost its socket
+// for some unusual reason, and kicks off a reconnect. Firefox's persistent background page never
+// unloads and has no `offscreen` API, so this is a harmless no-op there.
+const KEEP_ALIVE_ALARM = 'ai-prompt-keepalive';
+if (browserAPI.alarms) {
+  browserAPI.alarms.create(KEEP_ALIVE_ALARM, { periodInMinutes: 1 });
+  browserAPI.alarms.onAlarm.addListener(async (alarm) => {
+    if (alarm.name !== KEEP_ALIVE_ALARM) return;
+    if (useNativeMessaging) {
+      if (!nativePort) connectNative();
+    } else if (!(await isWsOpen())) {
+      connect();
+    }
+  });
+}

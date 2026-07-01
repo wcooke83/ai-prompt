@@ -23,3 +23,9 @@ node_modules/
 # Test files
 test-*.js
 *-screenshot.png
+.aider*
+
+# Chrome extension signing key (pins the unpacked extension's ID; keep local-only).
+# Deliberately NOT under ai-prompt-extension/ — Chrome's "Load unpacked" scans that whole
+# folder and warns about bundled .pem/.key files (a real packaging hazard if ever zipped).
+chrome-signing-key.pem

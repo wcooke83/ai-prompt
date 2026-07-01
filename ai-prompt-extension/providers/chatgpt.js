@@ -243,11 +243,10 @@ const ChatGPTProvider = {
   }
 };
 
-if (typeof window !== 'undefined') {
-  window.ChatGPTProvider = ChatGPTProvider;
-  // Auto-register in content script context
-  if (window.ProviderRegistry) {
-    console.log('[ChatGPT] Registering provider with ProviderRegistry');
-    window.ProviderRegistry.register(ChatGPTProvider);
-  }
+self.ChatGPTProvider = ChatGPTProvider;
+// Auto-register in content script context (background/service-worker context registers
+// explicitly in background.js instead, once all provider files have loaded)
+if (self.ProviderRegistry) {
+  console.log('[ChatGPT] Registering provider with ProviderRegistry');
+  self.ProviderRegistry.register(ChatGPTProvider);
 }

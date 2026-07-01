@@ -1,3 +1,5 @@
+const browserAPI = typeof browser !== 'undefined' ? browser : chrome;
+
 const statusIndicator = document.getElementById('status-indicator');
 const statusText = document.getElementById('status-text');
 const providerList = document.getElementById('provider-list');
@@ -44,7 +46,7 @@ function logToBackground(level, ...args) {
     typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
   ).join(' ');
 
-  browser.runtime.sendMessage({
+  browserAPI.runtime.sendMessage({
     type: 'log',
     source: 'Popup',
     level: level,
@@ -77,7 +79,7 @@ tabs.forEach(tab => {
 
 // ============ Logs Management ============
 function loadLogs() {
-  browser.runtime.sendMessage({ type: 'getLogs' }).then(response => {
+  browserAPI.runtime.sendMessage({ type: 'getLogs' }).then(response => {
     displayLogs(response.logs || []);
   });
 }
@@ -128,7 +130,7 @@ function escapeHtml(text) {
 }
 
 clearLogsBtn.addEventListener('click', () => {
-  browser.runtime.sendMessage({ type: 'clearLogs' }).then(() => {
+  browserAPI.runtime.sendMessage({ type: 'clearLogs' }).then(() => {
     logsContainer.innerHTML = '<div class="empty-logs">No logs yet</div>';
   });
 });
@@ -140,7 +142,7 @@ autoScrollBtn.addEventListener('click', () => {
 });
 
 // Listen for new logs
-browser.runtime.onMessage.addListener((message) => {
+browserAPI.runtime.onMessage.addListener((message) => {
   if (message.type === 'newLog') {
     // Only update if logs tab is active
     if (document.querySelector('.tab[data-tab="logs"]').classList.contains('active')) {
@@ -176,7 +178,7 @@ function renderConnectionDetail() {
 
 // Trigger a reconnect and give brief feedback on the clicked button.
 function triggerReconnect(btn) {
-  browser.runtime.sendMessage({ type: 'reconnect' }).catch(() => {});
+  browserAPI.runtime.sendMessage({ type: 'reconnect' }).catch(() => {});
   if (!btn) return;
   const prevText = btn.textContent;
   btn.disabled = true;
@@ -270,7 +272,7 @@ function handleProviderToggle(name, li, enabled) {
     disabledProviders.push(name);
   }
   updateRankNumbers();
-  browser.runtime.sendMessage({ type: 'setProviderEnabled', name, enabled });
+  browserAPI.runtime.sendMessage({ type: 'setProviderEnabled', name, enabled });
 }
 
 function handleProviderPasteToggle(name, paste) {
@@ -279,7 +281,7 @@ function handleProviderPasteToggle(name, paste) {
   } else {
     pasteProviders = pasteProviders.filter(n => n !== name);
   }
-  browser.runtime.sendMessage({ type: 'setProviderPaste', name, paste });
+  browserAPI.runtime.sendMessage({ type: 'setProviderPaste', name, paste });
 }
 
 function handleDragStart(e) {
@@ -356,7 +358,7 @@ function updateRankNumbers() {
 function saveProviderOrder() {
   const items = providerList.querySelectorAll('.provider-list-item');
   const order = Array.from(items).map(item => item.dataset.provider);
-  browser.runtime.sendMessage({ type: 'setProviderOrder', order });
+  browserAPI.runtime.sendMessage({ type: 'setProviderOrder', order });
 }
 
 function updateWebsocketSettingsVisibility(useNative) {
@@ -364,7 +366,7 @@ function updateWebsocketSettingsVisibility(useNative) {
 }
 
 // Get initial status
-browser.runtime.sendMessage({ type: 'getStatus' }).then(response => {
+browserAPI.runtime.sendMessage({ type: 'getStatus' }).then(response => {
   currentPort = response.port;
   currentUseNative = response.useNativeMessaging !== false;
   updateStatus(response.state);
@@ -390,7 +392,7 @@ saveBtn.addEventListener('click', () => {
   if (port >= 1 && port <= 65535) {
     currentPort = port;
     renderConnectionDetail();
-    browser.runtime.sendMessage({ type: 'setPort', port });
+    browserAPI.runtime.sendMessage({ type: 'setPort', port });
   }
 });
 
@@ -402,7 +404,7 @@ if (reconnectBtnWs) {
 
 // Fast reconnect toggle
 fastReconnectToggle.addEventListener('change', () => {
-  browser.runtime.sendMessage({ type: 'setFastReconnect', value: fastReconnectToggle.checked });
+  browserAPI.runtime.sendMessage({ type: 'setFastReconnect', value: fastReconnectToggle.checked });
 });
 
 // Native messaging toggle
@@ -410,29 +412,29 @@ nativeMessagingToggle.addEventListener('change', () => {
   const useNative = nativeMessagingToggle.checked;
   currentUseNative = useNative;
   renderConnectionDetail();
-  browser.runtime.sendMessage({ type: 'setUseNativeMessaging', value: useNative });
+  browserAPI.runtime.sendMessage({ type: 'setUseNativeMessaging', value: useNative });
   updateWebsocketSettingsVisibility(useNative);
 });
 
 // Debug logging toggle
 debugLoggingToggle.addEventListener('change', () => {
-  browser.runtime.sendMessage({ type: 'setDebugLogging', value: debugLoggingToggle.checked });
+  browserAPI.runtime.sendMessage({ type: 'setDebugLogging', value: debugLoggingToggle.checked });
 });
 
 // Keep tabs open toggle
 keepTabsOpenToggle.addEventListener('change', () => {
-  browser.runtime.sendMessage({ type: 'setKeepTabsOpen', value: keepTabsOpenToggle.checked });
+  browserAPI.runtime.sendMessage({ type: 'setKeepTabsOpen', value: keepTabsOpenToggle.checked });
 });
 
 // Hide tabs toggle
 hideTabsToggle.addEventListener('change', () => {
-  browser.runtime.sendMessage({ type: 'setHideTabs', value: hideTabsToggle.checked });
+  browserAPI.runtime.sendMessage({ type: 'setHideTabs', value: hideTabsToggle.checked });
 });
 
 // DOM stabilize ms input
 domStabilizeMsInput.addEventListener('change', () => {
   const value = parseInt(domStabilizeMsInput.value, 10);
   if (value >= 500 && value <= 10000) {
-    browser.runtime.sendMessage({ type: 'setDomStabilizeMs', value });
+    browserAPI.runtime.sendMessage({ type: 'setDomStabilizeMs', value });
   }
 });

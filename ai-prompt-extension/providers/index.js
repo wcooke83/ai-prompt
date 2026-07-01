@@ -57,14 +57,14 @@ function urlMatchesPattern(url, pattern) {
   return pathRegex.test(path);
 }
 
-// Export
-if (typeof window !== 'undefined') {
-  window.ProviderRegistry = {
-    register: registerProvider,
-    get: getProvider,
-    getAll: getAllProviders,
-    getForUrl: getProviderForUrl,
-    urlMatchesPattern: urlMatchesPattern,
-    providers: providers
-  };
-}
+// Export. Use `self` (not `window`) so this also works in a Chrome MV3 service worker,
+// which has no `window` — `self` is the global object in every context (page, content
+// script, background page, and service worker) that this file is loaded into.
+self.ProviderRegistry = {
+  register: registerProvider,
+  get: getProvider,
+  getAll: getAllProviders,
+  getForUrl: getProviderForUrl,
+  urlMatchesPattern: urlMatchesPattern,
+  providers: providers
+};

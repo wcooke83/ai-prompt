@@ -2,6 +2,8 @@
 // This hijacks console methods BEFORE any other scripts load
 
 (function() {
+  const browserAPI = typeof browser !== 'undefined' ? browser : chrome;
+
   // Send log to background
   function sendLogToBackground(level, ...args) {
     const message = args.map(arg =>
@@ -9,7 +11,7 @@
     ).join(' ');
 
     try {
-      browser.runtime.sendMessage({
+      browserAPI.runtime.sendMessage({
         type: 'log',
         source: 'Content',
         level: level,

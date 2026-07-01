@@ -14,7 +14,7 @@ Choose WebSocket for standalone CLI usage. Choose Native Messaging for better Fi
 ## Requirements
 
 - Python 3.8+
-- Firefox with AI Provider Automator extension loaded
+- Firefox or Chrome with the AI Provider Automator extension loaded
 - Active session with your chosen AI provider (ChatGPT, Claude, Grok, or DeepSeek)
 
 ## Install
@@ -106,16 +106,21 @@ Logs are written to `logs/ws_YYYYMMDD_HHMMSS.log` when enabled.
 
 ### Setup
 
-1. **Install the native messaging host:**
+1. **Install the native messaging host(s):**
    ```bash
-   ./install-native-host.sh
+   ./install-native-host.sh        # installs for both Firefox and Chrome
+   ./install-native-host.sh ff     # Firefox only
+   ./install-native-host.sh chrome # Chrome only
    ```
-   This creates `~/.mozilla/native-messaging-hosts/ai_prompt_native.json` (Linux) or `~/Library/Application Support/Mozilla/NativeMessagingHosts/ai_prompt_native.json` (macOS).
+   Firefox: `~/.mozilla/native-messaging-hosts/ai_prompt_native.json` (Linux) or `~/Library/Application Support/Mozilla/NativeMessagingHosts/ai_prompt_native.json` (macOS).
 
-2. **Restart Firefox and reload the extension**
-   - Go to `about:debugging` → This Firefox → Reload the AI Provider Automator extension
+   Chrome: `~/.config/google-chrome/NativeMessagingHosts/ai_prompt_native.json` (Linux) or `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/ai_prompt_native.json` (macOS). The `allowed_origins` entry is derived automatically from the pinned extension ID in `../ai-prompt-extension/manifest.chrome.json`.
+
+2. **Restart the browser and reload the extension**
+   - Firefox: `about:debugging` → This Firefox → Reload the AI Provider Automator extension
+   - Chrome: `chrome://extensions` → Reload the AI Provider Automator extension
    - The extension will automatically launch `native-host.py` when it loads
-   - Check browser console for "Native host connected" message
+   - Check the browser console for "Native host connected" message
 
 3. **Verify connection:**
    ```bash

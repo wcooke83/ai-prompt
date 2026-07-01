@@ -217,10 +217,12 @@ const DeepSeekProvider = {
   }
 };
 
-// Register the provider (if using ProviderRegistry)
-if (typeof window !== 'undefined' && window.ProviderRegistry) {
+// Register the provider (if using ProviderRegistry). Auto-register in content script context
+// (background/service-worker context registers explicitly in background.js instead, once all
+// provider files have loaded)
+if (self.ProviderRegistry) {
   console.log('[DeepSeek] Registering provider with ProviderRegistry');
-  window.ProviderRegistry.register(DeepSeekProvider);
+  self.ProviderRegistry.register(DeepSeekProvider);
 }
 
 // Export for use in other files
