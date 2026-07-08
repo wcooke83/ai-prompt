@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 """
-Native messaging host for AI Provider Automator extension.
-Communicates with Firefox extension via stdin/stdout using native messaging protocol.
-CLI communicates with this host via a Unix socket.
+Native messaging host for AI Provider Automator extension (stdlib-only, CLI path).
+
+DEPRECATED / superseded: install-native-host.sh now points the browser at
+scripts/native-host-launcher.sh, which runs the MERGED host
+(ai_prompt_api/native_host.py) — that one adds the HTTP bridge on top of this
+same native-messaging + unix-socket behaviour. This file is kept only as a
+lightweight, dependency-free reference; don't repoint the manifest back at it if
+you want the HTTP API.
+
+Communicates with the extension via stdin/stdout using the native messaging
+protocol. The CLI communicates with this host via a Unix socket.
 """
 
 import asyncio

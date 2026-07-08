@@ -4,46 +4,78 @@ Send prompts to AI chat providers (ChatGPT, Grok, Claude, DeepSeek) programmatic
 
 ## Architecture
 
+Two ways to run the HTTP bridge:
+
+**Recommended — browser-managed (native host serves HTTP).** The browser launches a
+native-messaging host automatically when the extension loads. That one process talks
+to the extension over stdio **and** serves the REST API on a port the **extension
+chooses** (popup → *HTTP API Port*) and pushes to it. Nothing to start by hand, nothing
+to forget after a reboot, and each browser profile can use its own port.
+
 ```
-CLI / HTTP Client
-      │
+HTTP Client (app)
+      │  POST /prompt on the extension-chosen port
       ▼
-  REST API (FastAPI)  ◄──►  WebSocket  ◄──►  Firefox Extension  ◄──►  AI Provider Tab
-  :8000                      :8760              (content scripts)       (ChatGPT, Grok, etc.)
+  native host (ai_prompt_api.native_host)  ◄── stdio ──►  Extension  ◄──►  AI Provider Tab
+  launched by the browser                    (native msg)  (content scripts)  (ChatGPT, Grok, …)
 ```
 
-1. **API** (`ai_prompt_api/`) — FastAPI server exposing REST endpoints for prompts, sessions, and health checks. Communicates with the extension over a WebSocket server.
-2. **Extension** (`ai-prompt-extension/`) — Firefox extension that receives prompts via WebSocket or native messaging, opens AI provider tabs, injects text, waits for responses, and sends them back.
-3. **CLI** (`ai-prompt-cli/`) — Command-line client that can connect directly to the extension (WebSocket or native messaging) for quick scripting without the API.
+**Alternative — standalone bridge (WebSocket).** A separately-started FastAPI process
+serves HTTP and runs a WebSocket server the extension dials into as a client. Use this
+headless (CI, no native-messaging host) or for the legacy transport.
 
-## Quick Start
+```
+HTTP Client  ──►  REST API (FastAPI)  ◄── WebSocket ──►  Extension  ◄──►  AI Provider Tab
+                  :8200                    :8760
+```
 
-### 1. Start the API
+Components:
+
+1. **API** (`ai_prompt_api/`) — FastAPI routers for prompts, sessions, health. `native_host.py`
+   is the browser-managed host (native messaging + HTTP); `main.py` is the standalone WebSocket bridge.
+2. **Extension** (`ai-prompt-extension/`) — receives prompts via native messaging (preferred) or
+   WebSocket, opens AI provider tabs, injects text, waits for responses, sends them back.
+3. **CLI** (`ai-prompt-cli/`) — command-line client that talks to the extension directly (unix
+   socket via native messaging, or WebSocket) for quick scripting without an app.
+
+## Quick Start (recommended: browser-managed)
+
+### 1. Install the native-messaging host (once)
 
 ```bash
-cd ai_prompt_api
-pip install -r requirements.txt
-uvicorn ai_prompt_api.main:app --host 0.0.0.0 --port 8000
+./ai-prompt-cli/install-native-host.sh          # ff | chrome | all
 ```
+
+This points the browser at `scripts/native-host-launcher.sh`, which runs the merged
+host under the package venv (`ai_prompt_api/.venv`). The browser now starts/stops the
+bridge for you.
 
 ### 2. Load the Extension
 
-- Open Firefox → `about:debugging` → This Firefox → Load Temporary Add-on
-- Select `ai-prompt-extension/manifest.json`
-- Ensure you're logged into at least one AI provider (ChatGPT, Grok, etc.)
+- Firefox: `about:debugging` → This Firefox → Load Temporary Add-on → `ai-prompt-extension/manifest.json`
+- In the popup → Settings, keep **Native Messaging** on and set the **HTTP API Port** (default 8200).
+- Log into at least one AI provider (ChatGPT, Grok, …).
 
 ### 3. Send a Prompt
 
 ```bash
-# Via API
-curl -X POST http://localhost:8000/prompt \
+curl -X POST http://localhost:8200/prompt \
   -H "Content-Type: application/json" \
   -d '{"text": "What is 2+2?", "ephemeral": true}'
 
-# Via CLI (direct to extension, no API needed)
-cd ai-prompt-cli
-./ai-prompt.py "What is 2+2?"
+# Or, direct to the extension with no HTTP at all:
+cd ai-prompt-cli && ./ai-prompt.py "What is 2+2?"
 ```
+
+### Alternative: standalone bridge (headless / legacy WebSocket)
+
+```bash
+./scripts/start-bridge.sh            # (re)start on :8200 (HTTP) + :8760 (extension WS)
+./scripts/start-bridge.sh --status
+./scripts/start-bridge.sh --stop
+# PORT=8201 WS_PORT=8761 ./scripts/start-bridge.sh   # a second instance
+```
+In this mode turn **Native Messaging off** in the popup and set the **WebSocket Port** to match `WS_PORT`.
 
 ## Components
 

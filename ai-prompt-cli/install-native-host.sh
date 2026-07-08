@@ -1,13 +1,25 @@
 #!/bin/bash
-# Install native messaging host(s) for AI Provider Automator
+# Install native messaging host(s) for AI Provider Automator.
 # Usage: ./install-native-host.sh [ff|chrome|all]   (default: all)
+#
+# The manifest points the browser at scripts/native-host-launcher.sh, which runs
+# the MERGED native host (ai_prompt_api.native_host) under the package venv (ai_prompt_api/.venv).
+# That host talks native messaging to the extension AND serves the HTTP bridge on
+# the port the extension pushes down (popup -> "HTTP API Port"). So once this is
+# installed, the browser starts/stops the bridge automatically — no start script.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HOST_SCRIPT="$SCRIPT_DIR/native-host.py"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+HOST_SCRIPT="$REPO_ROOT/scripts/native-host-launcher.sh"
 MANIFEST_NAME="ai_prompt_native.json"
 TARGET="${1:-all}"
 
-# Make host script executable
+if [[ ! -f "$HOST_SCRIPT" ]]; then
+  echo "ERROR: launcher not found at $HOST_SCRIPT"
+  exit 1
+fi
+
+# Make launcher executable (native messaging requires an executable path)
 chmod +x "$HOST_SCRIPT"
 
 install_ff() {

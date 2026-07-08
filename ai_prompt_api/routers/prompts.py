@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from .. import state
 from ..auth import require_api_key
 from ..config import settings
 from ..models import ImageData, PromptRequest, PromptResponse
@@ -12,7 +13,7 @@ router = APIRouter(tags=["prompts"], dependencies=[Depends(require_api_key)])
 @router.post("/prompt", response_model=PromptResponse)
 async def send_prompt(request: PromptRequest):
     """Send a prompt to the AI provider via browser extension."""
-    from ..main import extension_manager
+    extension_manager = state.extension_manager
 
     if not extension_manager or not extension_manager.is_connected:
         raise HTTPException(status_code=503, detail="Browser extension not connected")

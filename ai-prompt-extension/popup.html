@@ -409,6 +409,16 @@
           <span class="toggle-slider"></span>
         </div>
       </div>
+      <div id="native-settings">
+        <div class="section-label" style="margin-top: 12px;">HTTP API Port</div>
+        <div class="port-row">
+          <input type="number" id="http-port" min="1" max="65535" value="8200">
+        </div>
+        <div class="buttons">
+          <button id="save-http-btn">Save</button>
+        </div>
+        <div class="provider-hint">The port your apps POST prompts to (e.g. http://host.docker.internal:8200). The browser launches the bridge automatically and pushes this port to it — no start script needed. Give each browser a different port.</div>
+      </div>
       <div id="websocket-settings">
         <div class="section-label" style="margin-top: 12px;">WebSocket Port</div>
         <div class="port-row">

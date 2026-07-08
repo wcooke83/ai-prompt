@@ -123,6 +123,11 @@ ProviderRegistry.register(DeepSeekProvider);
 // Connection state
 let ws = null;
 let wsPort = 8760;
+// HTTP port the browser-managed native host should serve the REST API on. Unlike
+// wsPort (which the extension dials as a client), the extension DICTATES this port:
+// it's pushed to the native host via a `configure` message, and the host binds it.
+// Each browser profile can use a different one — that's the whole multi-browser story.
+let httpPort = 8200;
 let reconnectAttempts = 0;
 let reconnectTimeout = null;
 let connectionState = 'disconnected';
@@ -228,8 +233,12 @@ function connectNative() {
       if (message.type === 'host_ready') {
         log('Background', 'info', 'Native host ready');
         updateConnectionState('connected');
-        // Tell host we're ready
+        // Tell host we're ready, then tell it which port to serve the HTTP API on.
+        // The host waits for this before binding, so each browser's popup setting
+        // decides its own port (no cross-profile collisions).
         nativePort.postMessage({ type: 'ready' });
+        nativePort.postMessage({ type: 'configure', httpPort });
+        log('Background', 'info', `Sent configure: httpPort=${httpPort}`);
       } else if (message.type === 'prompt') {
         handlePrompt(message).then(result => {
           // Send response back through native port
@@ -263,9 +272,12 @@ function connectNative() {
 // ============ Load Settings & Initialize ============
 
 // Load saved settings from storage
-browserAPI.storage.local.get(['wsPort', 'fastReconnect', 'providerOrder', 'useNativeMessaging', 'debugLogging', 'keepTabsOpen', 'hideTabs', 'usePasteInput', 'pasteProviders', 'domStabilizeMs', 'disabledProviders']).then(result => {
+browserAPI.storage.local.get(['wsPort', 'httpPort', 'fastReconnect', 'providerOrder', 'useNativeMessaging', 'debugLogging', 'keepTabsOpen', 'hideTabs', 'usePasteInput', 'pasteProviders', 'domStabilizeMs', 'disabledProviders']).then(result => {
   if (result.wsPort) {
     wsPort = result.wsPort;
+  }
+  if (result.httpPort) {
+    httpPort = result.httpPort;
   }
   if (result.fastReconnect !== undefined) {
     fastReconnect = result.fastReconnect;
@@ -885,6 +897,7 @@ browserAPI.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({
         state: connectionState,
         port: wsPort,
+        httpPort: httpPort,
         fastReconnect: fastReconnect,
         useNativeMessaging: useNativeMessaging,
         nativeConnected: nativePort !== null,
@@ -956,6 +969,21 @@ browserAPI.runtime.onMessage.addListener((message, sender, sendResponse) => {
     reconnectAttempts = 0;
     closeWs();
     connect();
+    sendResponse({ success: true });
+  } else if (message.type === 'setHttpPort') {
+    // The HTTP API port the native host serves apps on. The host rebinds live, so
+    // just re-send configure to the running native port (if any); otherwise it's
+    // picked up on the next host_ready handshake.
+    httpPort = message.port;
+    browserAPI.storage.local.set({ httpPort });
+    if (nativePort) {
+      try {
+        nativePort.postMessage({ type: 'configure', httpPort });
+        log('Background', 'info', `Re-sent configure: httpPort=${httpPort}`);
+      } catch (e) {
+        log('Background', 'error', `Failed to send configure: ${e.message}`);
+      }
+    }
     sendResponse({ success: true });
   } else if (message.type === 'setFastReconnect') {
     fastReconnect = message.value;

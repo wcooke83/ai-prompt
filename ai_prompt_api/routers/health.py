@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter
 
+from .. import state
 from ..models import HealthResponse, Provider, StatusResponse
 
 router = APIRouter(tags=["health"])
@@ -10,23 +11,23 @@ router = APIRouter(tags=["health"])
 @router.get("/health", response_model=HealthResponse)
 async def health():
     """Check API health and extension connection status."""
-    from ..main import extension_manager
+    mgr = state.extension_manager
 
     return HealthResponse(
         status="ok",
-        extension_connected=extension_manager.is_connected if extension_manager else False,
+        extension_connected=mgr.is_connected if mgr else False,
     )
 
 
 @router.get("/status", response_model=StatusResponse)
 async def status():
     """Get detailed API status."""
-    from ..main import extension_manager
+    mgr = state.extension_manager
 
     return StatusResponse(
-        extension_connected=extension_manager.is_connected if extension_manager else False,
+        extension_connected=mgr.is_connected if mgr else False,
         active_provider=None,
         available_providers=[p.value for p in Provider],
-        pending_requests=len(extension_manager.pending_requests) if extension_manager else 0,
-        active_sessions=len(extension_manager.sessions) if extension_manager else 0,
+        pending_requests=len(mgr.pending_requests) if mgr else 0,
+        active_sessions=len(mgr.sessions) if mgr else 0,
     )

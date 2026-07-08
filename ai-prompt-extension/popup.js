@@ -11,6 +11,9 @@ const connectionDetail = document.getElementById('connection-detail');
 const fastReconnectToggle = document.getElementById('fast-reconnect');
 const nativeMessagingToggle = document.getElementById('native-messaging');
 const websocketSettings = document.getElementById('websocket-settings');
+const nativeSettings = document.getElementById('native-settings');
+const httpPortInput = document.getElementById('http-port');
+const saveHttpBtn = document.getElementById('save-http-btn');
 const debugLoggingToggle = document.getElementById('debug-logging');
 const keepTabsOpenToggle = document.getElementById('keep-tabs-open');
 const hideTabsToggle = document.getElementById('hide-tabs');
@@ -38,6 +41,7 @@ let autoScroll = true;
 let disabledProviders = []; // provider names switched off (mirrors background state)
 let pasteProviders = []; // provider names that paste the whole prompt at once (mirrors background state)
 let currentPort = 8760; // WebSocket port the background is targeting (mirrors background state)
+let currentHttpPort = 8200; // HTTP API port the native host is told to serve (mirrors background state)
 let currentUseNative = true; // whether native messaging is the preferred transport
 
 // Logging utility for popup
@@ -172,7 +176,7 @@ function updateStatus(state) {
 function renderConnectionDetail() {
   if (!connectionDetail) return;
   connectionDetail.textContent = currentUseNative
-    ? `Native messaging (WebSocket fallback: localhost:${currentPort})`
+    ? `Native messaging · HTTP API on localhost:${currentHttpPort}`
     : `WebSocket: localhost:${currentPort}`;
 }
 
@@ -361,23 +365,28 @@ function saveProviderOrder() {
   browserAPI.runtime.sendMessage({ type: 'setProviderOrder', order });
 }
 
-function updateWebsocketSettingsVisibility(useNative) {
+function updateConnectionSettingsVisibility(useNative) {
+  // In native mode the extension dictates the host's HTTP API port; in WebSocket
+  // mode it dials a separately-started bridge's WS port. Show only the relevant one.
+  nativeSettings.style.display = useNative ? 'block' : 'none';
   websocketSettings.style.display = useNative ? 'none' : 'block';
 }
 
 // Get initial status
 browserAPI.runtime.sendMessage({ type: 'getStatus' }).then(response => {
   currentPort = response.port;
+  currentHttpPort = response.httpPort || 8200;
   currentUseNative = response.useNativeMessaging !== false;
   updateStatus(response.state);
   portInput.value = response.port;
+  httpPortInput.value = currentHttpPort;
   fastReconnectToggle.checked = response.fastReconnect !== false;
   nativeMessagingToggle.checked = response.useNativeMessaging !== false;
   debugLoggingToggle.checked = response.debugLogging === true;
   keepTabsOpenToggle.checked = response.keepTabsOpen === true;
   hideTabsToggle.checked = response.hideTabs === true;
   domStabilizeMsInput.value = response.domStabilizeMs || 3000;
-  updateWebsocketSettingsVisibility(response.useNativeMessaging !== false);
+  updateConnectionSettingsVisibility(response.useNativeMessaging !== false);
 
   if (response.availableProviders) {
     disabledProviders = response.disabledProviders || [];
@@ -386,13 +395,23 @@ browserAPI.runtime.sendMessage({ type: 'getStatus' }).then(response => {
   }
 });
 
-// Save port
+// Save WebSocket port
 saveBtn.addEventListener('click', () => {
   const port = parseInt(portInput.value, 10);
   if (port >= 1 && port <= 65535) {
     currentPort = port;
     renderConnectionDetail();
     browserAPI.runtime.sendMessage({ type: 'setPort', port });
+  }
+});
+
+// Save HTTP API port (pushed to the native host, which rebinds live)
+saveHttpBtn.addEventListener('click', () => {
+  const port = parseInt(httpPortInput.value, 10);
+  if (port >= 1 && port <= 65535) {
+    currentHttpPort = port;
+    renderConnectionDetail();
+    browserAPI.runtime.sendMessage({ type: 'setHttpPort', port });
   }
 });
 
@@ -413,7 +432,7 @@ nativeMessagingToggle.addEventListener('change', () => {
   currentUseNative = useNative;
   renderConnectionDetail();
   browserAPI.runtime.sendMessage({ type: 'setUseNativeMessaging', value: useNative });
-  updateWebsocketSettingsVisibility(useNative);
+  updateConnectionSettingsVisibility(useNative);
 });
 
 // Debug logging toggle

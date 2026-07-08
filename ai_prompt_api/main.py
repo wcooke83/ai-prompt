@@ -1,25 +1,24 @@
 """FastAPI application entry point."""
 
 from contextlib import asynccontextmanager
-from typing import Optional
 
 from fastapi import FastAPI
 
+from . import state
 from .config import settings
 from .routers import health, prompts, sessions
 from .services.extension import ExtensionManager
-
-extension_manager: Optional[ExtensionManager] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage WebSocket server lifecycle."""
-    global extension_manager
-    extension_manager = ExtensionManager(port=settings.ws_port)
-    await extension_manager.start()
+    manager = ExtensionManager(port=settings.ws_port)
+    await manager.start()
+    state.extension_manager = manager
     yield
-    await extension_manager.stop()
+    await manager.stop()
+    state.extension_manager = None
 
 
 app = FastAPI(

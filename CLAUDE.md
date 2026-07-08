@@ -27,6 +27,15 @@ ai-prompt-extension/  Firefox extension (Manifest V2)
 
 **Sessions**: `--json` flag keeps tabs open and returns `session_id` for conversation continuity. Ephemeral mode (default without `--json`) closes tab after response.
 
+## HTTP Bridge (for apps, e.g. securities)
+
+Apps POST to a REST API (`ai_prompt_api/routers/`: `/prompt`, `/status`, `/sessions`, `/health`). The routers read the active transport from `ai_prompt_api/state.py` (`extension_manager`), so either transport can back them:
+
+- **`ai_prompt_api/native_host.py` (recommended, browser-managed).** The browser auto-launches this via the native-messaging manifest (`scripts/install-native-host.sh` → `scripts/native-host-launcher.sh`, which runs it under the package venv `ai_prompt_api/.venv`). One process = native messaging to the extension (stdio) + the unix socket for the CLI + a uvicorn HTTP server. **The extension dictates the HTTP port**: after `host_ready` it sends `{type:"ready"}` then `{type:"configure",httpPort}`, and the host binds/rebinds there. So per-browser ports are set in the popup ("HTTP API Port"), nothing on the shell side. **stdout is the native-messaging wire** — `native_host.py` repoints `sys.stdout`→stderr at import so uvicorn logs can't corrupt framing. Writes a discovery file at `~/.ai-prompt/instances/<pid>.json`.
+- **`ai_prompt_api/main.py` (standalone, legacy/headless).** `scripts/start-bridge.sh` runs uvicorn on `AI_PROMPT_PORT` (8200) with a WebSocket `ExtensionManager` on `AI_PROMPT_WS_PORT` (8760) the extension dials as a client. Use when the browser isn't managing the host.
+
+**No hot-reload** on either — restart (or reload the extension for the native host) after editing bridge Python. Config env vars use the `AI_PROMPT_` prefix (see README).
+
 ## Commands
 
 ### CLI Setup & Usage
