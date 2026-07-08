@@ -97,6 +97,8 @@ The popup has three tabs:
 |---------|---------|-------------|
 | Connection method | Native messaging | Native messaging or WebSocket |
 | WebSocket port | 8760 | Port for WebSocket connection |
+| HTTP API port | 8200 | Port the native host serves the REST API on (pushed to the host) |
+| API Key | *(none)* | Optional bearer token the native host enforces on the HTTP API; sent to the host via `configure` and applied live. Blank = no auth |
 | Fast reconnect | On | 500ms constant polling vs exponential backoff |
 | Keep tabs open | Off | Override ephemeral — never close tabs |
 | Use paste input | Off | Paste text instead of keystroke simulation |

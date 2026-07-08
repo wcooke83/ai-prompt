@@ -14,6 +14,8 @@ const websocketSettings = document.getElementById('websocket-settings');
 const nativeSettings = document.getElementById('native-settings');
 const httpPortInput = document.getElementById('http-port');
 const saveHttpBtn = document.getElementById('save-http-btn');
+const apiKeyInput = document.getElementById('api-key');
+const saveApiKeyBtn = document.getElementById('save-api-key-btn');
 const debugLoggingToggle = document.getElementById('debug-logging');
 const keepTabsOpenToggle = document.getElementById('keep-tabs-open');
 const hideTabsToggle = document.getElementById('hide-tabs');
@@ -380,6 +382,7 @@ browserAPI.runtime.sendMessage({ type: 'getStatus' }).then(response => {
   updateStatus(response.state);
   portInput.value = response.port;
   httpPortInput.value = currentHttpPort;
+  apiKeyInput.value = response.apiKey || '';
   fastReconnectToggle.checked = response.fastReconnect !== false;
   nativeMessagingToggle.checked = response.useNativeMessaging !== false;
   debugLoggingToggle.checked = response.debugLogging === true;
@@ -413,6 +416,16 @@ saveHttpBtn.addEventListener('click', () => {
     renderConnectionDetail();
     browserAPI.runtime.sendMessage({ type: 'setHttpPort', port });
   }
+});
+
+// Save API key (pushed to the native host, which applies it live for auth)
+saveApiKeyBtn.addEventListener('click', () => {
+  const apiKey = apiKeyInput.value.trim();
+  browserAPI.runtime.sendMessage({ type: 'setApiKey', apiKey }).then(() => {
+    const original = saveApiKeyBtn.textContent;
+    saveApiKeyBtn.textContent = 'Saved';
+    setTimeout(() => { saveApiKeyBtn.textContent = original; }, 1200);
+  });
 });
 
 // Reconnect (main tab button, plus the one in WebSocket settings)

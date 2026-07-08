@@ -128,6 +128,9 @@ let wsPort = 8760;
 // it's pushed to the native host via a `configure` message, and the host binds it.
 // Each browser profile can use a different one — that's the whole multi-browser story.
 let httpPort = 8200;
+// Optional bearer token the native host enforces on the HTTP API. Set from the
+// popup and pushed to the host via the `configure` message. Blank = no auth.
+let apiKey = '';
 let reconnectAttempts = 0;
 let reconnectTimeout = null;
 let connectionState = 'disconnected';
@@ -237,8 +240,8 @@ function connectNative() {
         // The host waits for this before binding, so each browser's popup setting
         // decides its own port (no cross-profile collisions).
         nativePort.postMessage({ type: 'ready' });
-        nativePort.postMessage({ type: 'configure', httpPort });
-        log('Background', 'info', `Sent configure: httpPort=${httpPort}`);
+        nativePort.postMessage({ type: 'configure', httpPort, apiKey });
+        log('Background', 'info', `Sent configure: httpPort=${httpPort}, apiKey=${apiKey ? 'set' : 'none'}`);
       } else if (message.type === 'prompt') {
         handlePrompt(message).then(result => {
           // Send response back through native port
@@ -272,12 +275,15 @@ function connectNative() {
 // ============ Load Settings & Initialize ============
 
 // Load saved settings from storage
-browserAPI.storage.local.get(['wsPort', 'httpPort', 'fastReconnect', 'providerOrder', 'useNativeMessaging', 'debugLogging', 'keepTabsOpen', 'hideTabs', 'usePasteInput', 'pasteProviders', 'domStabilizeMs', 'disabledProviders']).then(result => {
+browserAPI.storage.local.get(['wsPort', 'httpPort', 'apiKey', 'fastReconnect', 'providerOrder', 'useNativeMessaging', 'debugLogging', 'keepTabsOpen', 'hideTabs', 'usePasteInput', 'pasteProviders', 'domStabilizeMs', 'disabledProviders']).then(result => {
   if (result.wsPort) {
     wsPort = result.wsPort;
   }
   if (result.httpPort) {
     httpPort = result.httpPort;
+  }
+  if (result.apiKey !== undefined) {
+    apiKey = result.apiKey;
   }
   if (result.fastReconnect !== undefined) {
     fastReconnect = result.fastReconnect;
@@ -898,6 +904,7 @@ browserAPI.runtime.onMessage.addListener((message, sender, sendResponse) => {
         state: connectionState,
         port: wsPort,
         httpPort: httpPort,
+        apiKey: apiKey,
         fastReconnect: fastReconnect,
         useNativeMessaging: useNativeMessaging,
         nativeConnected: nativePort !== null,
@@ -978,8 +985,22 @@ browserAPI.runtime.onMessage.addListener((message, sender, sendResponse) => {
     browserAPI.storage.local.set({ httpPort });
     if (nativePort) {
       try {
-        nativePort.postMessage({ type: 'configure', httpPort });
+        nativePort.postMessage({ type: 'configure', httpPort, apiKey });
         log('Background', 'info', `Re-sent configure: httpPort=${httpPort}`);
+      } catch (e) {
+        log('Background', 'error', `Failed to send configure: ${e.message}`);
+      }
+    }
+    sendResponse({ success: true });
+  } else if (message.type === 'setApiKey') {
+    // The bearer token the native host enforces on the HTTP API. The host
+    // applies it live via `configure` (no rebind needed).
+    apiKey = message.apiKey || '';
+    browserAPI.storage.local.set({ apiKey });
+    if (nativePort) {
+      try {
+        nativePort.postMessage({ type: 'configure', httpPort, apiKey });
+        log('Background', 'info', `Re-sent configure: apiKey=${apiKey ? 'set' : 'none'}`);
       } catch (e) {
         log('Background', 'error', `Failed to send configure: ${e.message}`);
       }

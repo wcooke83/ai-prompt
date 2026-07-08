@@ -418,6 +418,14 @@
           <button id="save-http-btn">Save</button>
         </div>
         <div class="provider-hint">The port your apps POST prompts to (e.g. http://host.docker.internal:8200). The browser launches the bridge automatically and pushes this port to it — no start script needed. Give each browser a different port.</div>
+        <div class="section-label" style="margin-top: 12px;">API Key (optional)</div>
+        <div class="port-row">
+          <input type="text" id="api-key" placeholder="Bearer token apps must send (blank = no auth)" autocomplete="off">
+        </div>
+        <div class="buttons">
+          <button id="save-api-key-btn">Save</button>
+        </div>
+        <div class="provider-hint">If set, apps must send <code>Authorization: Bearer &lt;key&gt;</code> with every request. Leave blank to disable auth (local dev). Pushed to the bridge live — no restart needed.</div>
       </div>
       <div id="websocket-settings">
         <div class="section-label" style="margin-top: 12px;">WebSocket Port</div>
