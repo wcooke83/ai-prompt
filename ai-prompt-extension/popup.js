@@ -45,6 +45,7 @@ let pasteProviders = []; // provider names that paste the whole prompt at once (
 let currentPort = 8760; // WebSocket port the background is targeting (mirrors background state)
 let currentHttpPort = 8200; // HTTP API port the native host is told to serve (mirrors background state)
 let currentUseNative = true; // whether native messaging is the preferred transport
+let currentNativeUnavailable = false; // native is preferred but its host isn't installed -> on WebSocket
 
 // Logging utility for popup
 function logToBackground(level, ...args) {
@@ -155,6 +156,7 @@ browserAPI.runtime.onMessage.addListener((message) => {
       addLogEntry(message.log);
     }
   } else if (message.type === 'connectionState') {
+    if (typeof message.nativeUnavailable === 'boolean') currentNativeUnavailable = message.nativeUnavailable;
     updateStatus(message.state);
   }
 });
@@ -177,9 +179,15 @@ function updateStatus(state) {
 // old 8765 pointing at something that isn't the bridge) is visible at a glance.
 function renderConnectionDetail() {
   if (!connectionDetail) return;
-  connectionDetail.textContent = currentUseNative
-    ? `Native messaging · HTTP API on localhost:${currentHttpPort}`
-    : `WebSocket: localhost:${currentPort}`;
+  if (currentUseNative && currentNativeUnavailable) {
+    // Native is the chosen transport, but its host isn't installed here — we've fallen back.
+    // Say so plainly instead of implying native is carrying traffic.
+    connectionDetail.textContent = `Native host not found — using WebSocket: localhost:${currentPort}`;
+  } else if (currentUseNative) {
+    connectionDetail.textContent = `Native messaging · HTTP API on localhost:${currentHttpPort}`;
+  } else {
+    connectionDetail.textContent = `WebSocket: localhost:${currentPort}`;
+  }
 }
 
 // Trigger a reconnect and give brief feedback on the clicked button.
@@ -379,6 +387,7 @@ browserAPI.runtime.sendMessage({ type: 'getStatus' }).then(response => {
   currentPort = response.port;
   currentHttpPort = response.httpPort || 8200;
   currentUseNative = response.useNativeMessaging !== false;
+  currentNativeUnavailable = response.nativeUnavailable === true;
   updateStatus(response.state);
   portInput.value = response.port;
   httpPortInput.value = currentHttpPort;
@@ -443,6 +452,7 @@ fastReconnectToggle.addEventListener('change', () => {
 nativeMessagingToggle.addEventListener('change', () => {
   const useNative = nativeMessagingToggle.checked;
   currentUseNative = useNative;
+  currentNativeUnavailable = false; // re-probing native from scratch
   renderConnectionDetail();
   browserAPI.runtime.sendMessage({ type: 'setUseNativeMessaging', value: useNative });
   updateConnectionSettingsVisibility(useNative);

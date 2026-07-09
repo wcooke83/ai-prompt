@@ -139,6 +139,15 @@ let fastReconnect = true; // Default to fast reconnect
 let providerOrder = ['chatgpt', 'grok', 'claude', 'deepseek']; // Default order
 let useNativeMessaging = true; // Prefer native messaging
 let nativePort = null;
+// True once we've learned the native-messaging host isn't installed on this machine
+// (connectNative disconnected before ever sending host_ready — e.g. "No such native
+// application ai_prompt_native"). We then stay on the WebSocket bridge instead of
+// re-probing native on every keep-alive tick — that churn was what flipped the popup to
+// "Disconnected" once a minute and spammed the log. A manual Reconnect, or toggling the
+// Native-messaging switch, clears this and re-probes.
+let nativeUnavailable = false;
+// True between the host's `host_ready` and its port disconnecting — i.e. native is live.
+let nativeReady = false;
 let debugLogging = false; // Debug logging for content scripts
 let keepTabsOpen = false; // Keep tabs open after response (overrides ephemeral)
 let hideTabs = false; // Open provider tabs hidden (active:false + tabs.hide) so they never appear
@@ -226,6 +235,12 @@ function connectNative() {
   if (nativePort) {
     return; // Already connected
   }
+  if (nativeUnavailable) {
+    // We've already learned the native host isn't installed here — don't re-probe it
+    // (that's the once-a-minute "Disconnected" flicker); keep using the WebSocket bridge.
+    connect();
+    return;
+  }
 
   try {
     log('Background', 'info', 'Connecting to native host...');
@@ -235,6 +250,8 @@ function connectNative() {
       log('Background', 'info', 'Native message received:', message.type);
       if (message.type === 'host_ready') {
         log('Background', 'info', 'Native host ready');
+        nativeReady = true;
+        nativeUnavailable = false;
         updateConnectionState('connected');
         // Tell host we're ready, then tell it which port to serve the HTTP API on.
         // The host waits for this before binding, so each browser's popup setting
@@ -252,12 +269,30 @@ function connectNative() {
 
     nativePort.onDisconnect.addListener((p) => {
       const error = p.error || browserAPI.runtime.lastError;
-      log('Background', 'warn', 'Native host disconnected:', error?.message || 'unknown');
+      const wasReady = nativeReady;
       nativePort = null;
-      updateConnectionState('disconnected');
+      nativeReady = false;
 
-      // Fall back to WebSocket if native messaging fails (but keep user preference)
-      log('Background', 'info', 'Native messaging unavailable, falling back to WebSocket');
+      if (!wasReady) {
+        // Disconnected before host_ready => the native host isn't installed/registered on this
+        // machine (e.g. "No such native application ai_prompt_native"). Expected on boxes that run
+        // the standalone WebSocket bridge instead. Fall back to WebSocket and STAY there: don't
+        // re-probe native every keep-alive tick, and DON'T flip the popup to "Disconnected" — the
+        // WebSocket path reports the real state. Log it once so it's discoverable but not spammy.
+        if (!nativeUnavailable) {
+          nativeUnavailable = true;
+          log('Background', 'info',
+            `Native messaging host not available (${error?.message || 'unknown'}); using the WebSocket bridge instead.`);
+        }
+        connect();
+        return;
+      }
+
+      // Native was live and then dropped (host crashed/closed) — a genuine disconnect. Surface it,
+      // fall back to WebSocket for now, and let the keep-alive tick re-probe native.
+      log('Background', 'warn', 'Native host disconnected:', error?.message || 'unknown');
+      updateConnectionState('disconnected');
+      log('Background', 'info', 'Falling back to WebSocket');
       connect();
     });
 
@@ -329,11 +364,19 @@ browserAPI.storage.local.get(['wsPort', 'httpPort', 'apiKey', 'fastReconnect', '
   }
 });
 
+// Which transport is actually carrying traffic right now, so the popup can label the
+// connection honestly (native, or the WebSocket fallback) rather than always claiming native.
+function currentTransport() {
+  return useNativeMessaging && nativeReady ? 'native' : 'websocket';
+}
+
 function updateConnectionState(state) {
   connectionState = state;
   browserAPI.runtime.sendMessage({
     type: 'connectionState',
     state,
+    transport: currentTransport(),
+    nativeUnavailable,
     provider: activeProvider ? activeProvider.name : null
   }).catch(() => {});
 }
@@ -908,6 +951,8 @@ browserAPI.runtime.onMessage.addListener((message, sender, sendResponse) => {
         fastReconnect: fastReconnect,
         useNativeMessaging: useNativeMessaging,
         nativeConnected: nativePort !== null,
+        nativeUnavailable: nativeUnavailable,
+        transport: currentTransport(),
         providerOrder: providerOrder,
         debugLogging: debugLogging,
         keepTabsOpen: keepTabsOpen,
@@ -958,6 +1003,9 @@ browserAPI.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Disconnect current connections and reconnect with new method
     if (reconnectTimeout) { clearTimeout(reconnectTimeout); reconnectTimeout = null; }
     reconnectAttempts = 0;
+    // Re-probe native from scratch on an explicit transport change.
+    nativeUnavailable = false;
+    nativeReady = false;
     closeWs();
     if (nativePort) {
       try { nativePort.disconnect(); } catch (e) {}
@@ -1032,6 +1080,10 @@ browserAPI.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // existing socket/port and pending retry first so we don't stack connections.
     if (reconnectTimeout) { clearTimeout(reconnectTimeout); reconnectTimeout = null; }
     reconnectAttempts = 0;
+    // An explicit Reconnect re-probes native even if we'd earlier marked it unavailable
+    // (the user may have just installed the native host).
+    nativeUnavailable = false;
+    nativeReady = false;
     closeWs();
     if (nativePort) { try { nativePort.disconnect(); } catch (e) {} nativePort = null; }
     updateConnectionState('disconnected');
@@ -1077,7 +1129,10 @@ if (browserAPI.alarms) {
   browserAPI.alarms.create(KEEP_ALIVE_ALARM, { periodInMinutes: 1 });
   browserAPI.alarms.onAlarm.addListener(async (alarm) => {
     if (alarm.name !== KEEP_ALIVE_ALARM) return;
-    if (useNativeMessaging) {
+    // Prefer native only while it's actually available. Once it's been found missing
+    // (nativeUnavailable), keep the WebSocket bridge alive instead of re-probing native every
+    // minute — that churn was what surfaced as a once-a-minute "Disconnected" flicker in the popup.
+    if (useNativeMessaging && !nativeUnavailable) {
       if (!nativePort) connectNative();
     } else if (!(await isWsOpen())) {
       connect();
