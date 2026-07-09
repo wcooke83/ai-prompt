@@ -178,6 +178,24 @@
     button.secondary:hover {
       background-color: #4b5563;
     }
+    /* Transient save feedback (see flashButton in popup.js) */
+    button.save-ok, button.save-ok:hover {
+      background-color: #22c55e;
+    }
+    button.save-error, button.save-error:hover {
+      background-color: #ef4444;
+    }
+    /* Shown when native messaging is chosen but its host isn't installed here */
+    .native-note {
+      margin-top: 12px;
+      padding: 8px 10px;
+      font-size: 11px;
+      line-height: 1.4;
+      color: #92400e;
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+      border-radius: 4px;
+    }
     .toggle-row {
       display: flex;
       align-items: center;
@@ -410,6 +428,11 @@
         </div>
       </div>
       <div id="native-settings">
+        <div id="native-unavailable-note" class="native-note" style="display: none;">
+          No native-messaging host is installed on this machine, so the extension is running over
+          the <strong>WebSocket bridge</strong> — see the WebSocket Port below, which is the setting
+          in effect. The HTTP API Port here only applies once a native host is installed.
+        </div>
         <div class="section-label" style="margin-top: 12px;">HTTP API Port</div>
         <div class="port-row">
           <input type="number" id="http-port" min="1" max="65535" value="8200">

@@ -14,6 +14,7 @@ const websocketSettings = document.getElementById('websocket-settings');
 const nativeSettings = document.getElementById('native-settings');
 const httpPortInput = document.getElementById('http-port');
 const saveHttpBtn = document.getElementById('save-http-btn');
+const nativeUnavailableNote = document.getElementById('native-unavailable-note');
 const apiKeyInput = document.getElementById('api-key');
 const saveApiKeyBtn = document.getElementById('save-api-key-btn');
 const debugLoggingToggle = document.getElementById('debug-logging');
@@ -46,6 +47,24 @@ let currentPort = 8760; // WebSocket port the background is targeting (mirrors b
 let currentHttpPort = 8200; // HTTP API port the native host is told to serve (mirrors background state)
 let currentUseNative = true; // whether native messaging is the preferred transport
 let currentNativeUnavailable = false; // native is preferred but its host isn't installed -> on WebSocket
+
+// Briefly show confirmation (or an error) on a save button, then restore its label.
+// kind: 'ok' (green) | 'error' (red) | undefined (neutral). Re-entrant-safe: a second
+// click while a flash is in flight resets cleanly rather than stacking timers/labels.
+function flashButton(btn, text, kind) {
+  if (!btn) return;
+  if (!btn.dataset.originalLabel) btn.dataset.originalLabel = btn.textContent;
+  if (btn._flashTimer) clearTimeout(btn._flashTimer);
+  btn.textContent = text;
+  btn.classList.remove('save-ok', 'save-error');
+  if (kind === 'ok') btn.classList.add('save-ok');
+  else if (kind === 'error') btn.classList.add('save-error');
+  btn._flashTimer = setTimeout(() => {
+    btn.textContent = btn.dataset.originalLabel;
+    btn.classList.remove('save-ok', 'save-error');
+    btn._flashTimer = null;
+  }, 1400);
+}
 
 // Logging utility for popup
 function logToBackground(level, ...args) {
@@ -156,7 +175,10 @@ browserAPI.runtime.onMessage.addListener((message) => {
       addLogEntry(message.log);
     }
   } else if (message.type === 'connectionState') {
-    if (typeof message.nativeUnavailable === 'boolean') currentNativeUnavailable = message.nativeUnavailable;
+    if (typeof message.nativeUnavailable === 'boolean') {
+      currentNativeUnavailable = message.nativeUnavailable;
+      updateConnectionSettingsVisibility();
+    }
     updateStatus(message.state);
   }
 });
@@ -375,11 +397,19 @@ function saveProviderOrder() {
   browserAPI.runtime.sendMessage({ type: 'setProviderOrder', order });
 }
 
-function updateConnectionSettingsVisibility(useNative) {
-  // In native mode the extension dictates the host's HTTP API port; in WebSocket
-  // mode it dials a separately-started bridge's WS port. Show only the relevant one.
-  nativeSettings.style.display = useNative ? 'block' : 'none';
-  websocketSettings.style.display = useNative ? 'none' : 'block';
+function updateConnectionSettingsVisibility() {
+  // In native mode the extension dictates the host's HTTP API port; in WebSocket mode it
+  // dials a separately-started bridge's WS port. Normally we show only the relevant one —
+  // BUT when native is chosen yet its host isn't installed here, the extension is really on
+  // the WebSocket fallback, so we surface the WebSocket settings too (that's the port that's
+  // actually in effect) and flag that the HTTP API Port above doesn't apply.
+  const nativeActive = currentUseNative && !currentNativeUnavailable;
+  nativeSettings.style.display = currentUseNative ? 'block' : 'none';
+  websocketSettings.style.display = nativeActive ? 'none' : 'block';
+  if (nativeUnavailableNote) {
+    nativeUnavailableNote.style.display =
+      currentUseNative && currentNativeUnavailable ? 'block' : 'none';
+  }
 }
 
 // Get initial status
@@ -398,7 +428,7 @@ browserAPI.runtime.sendMessage({ type: 'getStatus' }).then(response => {
   keepTabsOpenToggle.checked = response.keepTabsOpen === true;
   hideTabsToggle.checked = response.hideTabs === true;
   domStabilizeMsInput.value = response.domStabilizeMs || 3000;
-  updateConnectionSettingsVisibility(response.useNativeMessaging !== false);
+  updateConnectionSettingsVisibility();
 
   if (response.availableProviders) {
     disabledProviders = response.disabledProviders || [];
@@ -410,31 +440,37 @@ browserAPI.runtime.sendMessage({ type: 'getStatus' }).then(response => {
 // Save WebSocket port
 saveBtn.addEventListener('click', () => {
   const port = parseInt(portInput.value, 10);
-  if (port >= 1 && port <= 65535) {
-    currentPort = port;
-    renderConnectionDetail();
-    browserAPI.runtime.sendMessage({ type: 'setPort', port });
+  if (!(port >= 1 && port <= 65535)) {
+    flashButton(saveBtn, 'Enter 1–65535', 'error');
+    return;
   }
+  currentPort = port;
+  renderConnectionDetail();
+  browserAPI.runtime.sendMessage({ type: 'setPort', port })
+    .then(() => flashButton(saveBtn, 'Saved ✓', 'ok'))
+    .catch(() => flashButton(saveBtn, 'Save failed', 'error'));
 });
 
 // Save HTTP API port (pushed to the native host, which rebinds live)
 saveHttpBtn.addEventListener('click', () => {
   const port = parseInt(httpPortInput.value, 10);
-  if (port >= 1 && port <= 65535) {
-    currentHttpPort = port;
-    renderConnectionDetail();
-    browserAPI.runtime.sendMessage({ type: 'setHttpPort', port });
+  if (!(port >= 1 && port <= 65535)) {
+    flashButton(saveHttpBtn, 'Enter 1–65535', 'error');
+    return;
   }
+  currentHttpPort = port;
+  renderConnectionDetail();
+  browserAPI.runtime.sendMessage({ type: 'setHttpPort', port })
+    .then(() => flashButton(saveHttpBtn, 'Saved ✓', 'ok'))
+    .catch(() => flashButton(saveHttpBtn, 'Save failed', 'error'));
 });
 
 // Save API key (pushed to the native host, which applies it live for auth)
 saveApiKeyBtn.addEventListener('click', () => {
   const apiKey = apiKeyInput.value.trim();
-  browserAPI.runtime.sendMessage({ type: 'setApiKey', apiKey }).then(() => {
-    const original = saveApiKeyBtn.textContent;
-    saveApiKeyBtn.textContent = 'Saved';
-    setTimeout(() => { saveApiKeyBtn.textContent = original; }, 1200);
-  });
+  browserAPI.runtime.sendMessage({ type: 'setApiKey', apiKey })
+    .then(() => flashButton(saveApiKeyBtn, 'Saved ✓', 'ok'))
+    .catch(() => flashButton(saveApiKeyBtn, 'Save failed', 'error'));
 });
 
 // Reconnect (main tab button, plus the one in WebSocket settings)
@@ -455,7 +491,7 @@ nativeMessagingToggle.addEventListener('change', () => {
   currentNativeUnavailable = false; // re-probing native from scratch
   renderConnectionDetail();
   browserAPI.runtime.sendMessage({ type: 'setUseNativeMessaging', value: useNative });
-  updateConnectionSettingsVisibility(useNative);
+  updateConnectionSettingsVisibility();
 });
 
 // Debug logging toggle
