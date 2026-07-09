@@ -431,7 +431,9 @@
         <div id="native-unavailable-note" class="native-note" style="display: none;">
           No native-messaging host is installed on this machine, so the extension is running over
           the <strong>WebSocket bridge</strong> — see the WebSocket Port below, which is the setting
-          in effect. The HTTP API Port here only applies once a native host is installed.
+          in effect. The HTTP API Port and API Key here only apply once a native host is installed;
+          on this box the bridge's own <code>AI_PROMPT_API_KEY</code> (in its <code>.env</code>) is
+          what's enforced.
         </div>
         <div class="section-label" style="margin-top: 12px;">HTTP API Port</div>
         <div class="port-row">
