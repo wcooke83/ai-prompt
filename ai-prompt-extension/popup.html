@@ -331,6 +331,48 @@
       margin-top: 8px;
     }
 
+    /* Port map reference table */
+    .port-map-wrap {
+      overflow-x: auto;
+      margin-top: 8px;
+    }
+    .port-map {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 12px;
+    }
+    .port-map th,
+    .port-map td {
+      border: 1px solid #e5e7eb;
+      padding: 6px 8px;
+      text-align: left;
+      white-space: nowrap;
+      color: #333;
+    }
+    .port-map th {
+      background: #f8f9fa;
+      color: #6c757d;
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 10px;
+      letter-spacing: 0.4px;
+    }
+    .port-map td.cmd {
+      font-family: 'Consolas', 'Monaco', monospace;
+      color: #334155;
+      background: #f9fafb;
+    }
+    .port-map tr.current td {
+      background: #eff6ff;
+    }
+    .port-map tr.current td.cmd {
+      background: #dbeafe;
+    }
+    .port-map tr.current td:first-child {
+      font-weight: 600;
+      color: #2563eb;
+    }
+
     /* Logs styles */
     .logs-container {
       background: #1e1e1e;
@@ -468,6 +510,42 @@
             <span class="toggle-slider"></span>
           </div>
         </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-label">Port Map</div>
+      <div class="provider-hint" style="margin-top: 0;">
+        Apps POST prompts over <strong>HTTP</strong>; the extension talks to the bridge over
+        <strong>WebSocket</strong>. These are different ports, set together when you launch each
+        browser's bridge (the <code>PORT</code>/<code>WS_PORT</code> env vars — not the fields above).
+        The browser you're viewing this popup in is highlighted.
+      </div>
+      <div class="port-map-wrap">
+        <table class="port-map">
+          <thead>
+            <tr>
+              <th>Browser</th>
+              <th>HTTP port (apps use)</th>
+              <th>WS port (extension uses)</th>
+              <th>Set where</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr data-browser="firefox">
+              <td>Firefox</td>
+              <td>8201 (cp.cholds.com:8201)</td>
+              <td>8760</td>
+              <td class="cmd">PORT=8201 WS_PORT=8760 ./start-bridge.sh</td>
+            </tr>
+            <tr data-browser="chrome">
+              <td>Chrome</td>
+              <td>8202 (cp.cholds.com:8202)</td>
+              <td>8761</td>
+              <td class="cmd">PORT=8202 WS_PORT=8761 ./start-bridge.sh</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
 

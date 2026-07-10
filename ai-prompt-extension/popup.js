@@ -80,6 +80,16 @@ function logToBackground(level, ...args) {
   }).catch(() => {});
 }
 
+// ============ Port Map ============
+// Highlight the row for the browser this popup is running in. The extension can't
+// know the *other* browser's ports (each browser has its own bridge), so the table
+// is a static reference — we just mark "you are here".
+(function highlightCurrentBrowserRow() {
+  const key = navigator.userAgent.includes('Firefox') ? 'firefox' : 'chrome';
+  const row = document.querySelector(`.port-map tr[data-browser="${key}"]`);
+  if (row) row.classList.add('current');
+})();
+
 // ============ Tab Management ============
 const tabs = document.querySelectorAll('.tab');
 const tabContents = document.querySelectorAll('.tab-content');
