@@ -744,6 +744,17 @@ async function tryProviderWithFailover(text, request_id, preferredProvider, sess
     }
   }
 
+  // TRUE PIN: when the caller explicitly pinned a provider, that provider is the ONLY one
+  // allowed to receive this payload. Restrict the candidate list to just the pinned provider
+  // so no other provider can ever be substituted — structurally, not by luck of ordering.
+  // This runs only when preferredProvider is non-null (i.e. an explicitly pinned request).
+  // Failover recursion below always passes preferredProvider=null, so this is a no-op there
+  // and the full ChatGPT->Grok->Claude->DeepSeek chain is preserved byte-for-byte for
+  // unpinned callers.
+  if (preferredProvider) {
+    providersToTry = providersToTry.filter(p => p.name === preferredProvider);
+  }
+
   if (providersToTry.length === 0) {
     // Distinguish "nothing left to try" from "the user switched everything off".
     const anyEnabled = ProviderRegistry.getAll().some(p =>
@@ -787,6 +798,10 @@ async function tryProviderWithFailover(text, request_id, preferredProvider, sess
         delete sessions[sessionId];
         saveSessions();
       }
+      // TRUE PIN: pinned provider failed (tab/content-script error) — fail cleanly, never fall over.
+      if (preferredProvider) {
+        return { success: false, error: `pinned provider ${preferredProvider} failed; failover suppressed` };
+      }
       // Try next provider
       return tryProviderWithFailover(text, request_id, null, null, ephemeral, attachments, [...triedProviders, provider.name]);
     }
@@ -828,11 +843,19 @@ async function tryProviderWithFailover(text, request_id, preferredProvider, sess
         delete sessions[sessionId];
         saveSessions();
       }
+      // TRUE PIN: pinned provider returned success:false — fail cleanly, never fall over.
+      if (preferredProvider) {
+        return { success: false, error: `pinned provider ${preferredProvider} failed; failover suppressed` };
+      }
       // Try next provider
       return tryProviderWithFailover(text, request_id, null, null, ephemeral, attachments, [...triedProviders, provider.name]);
     }
   } catch (e) {
     console.log(`Provider ${providerToTry.name} error: ${e.message}`);
+    // TRUE PIN: pinned provider threw — fail cleanly, never fall over.
+    if (preferredProvider) {
+      return { success: false, error: `pinned provider ${preferredProvider} failed; failover suppressed` };
+    }
     // Try next provider
     return tryProviderWithFailover(text, request_id, null, null, ephemeral, attachments, [...triedProviders, providerToTry.name]);
   }
