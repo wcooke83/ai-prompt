@@ -21,33 +21,31 @@ const DeepSeekProvider = {
       'div.aaff8b8f textarea'
     ],
     
-    // Send button selectors - looking for the upload arrow icon
+    // Send button selectors. DeepSeek migrated its button markup from "ds-icon-button" to
+    // "ds-button" (the old class no longer appears anywhere in the DOM), so match the current
+    // circular primary button. The stable SVG-path identifier lives in content.js's
+    // clickSendButtonDeepSeek(), which does the actual clicking for this provider.
     sendButton: [
-      'div.ds-icon-button[role="button"]:not([aria-disabled="true"]) svg path[d^="M8.3125 0.981587"]',
-      'div.bf38813a div.ds-icon-button[role="button"]:not(.ds-icon-button--disabled)',
-      'div._7436101.ds-icon-button[role="button"]:not([aria-disabled="true"])'
+      'div[role="button"].ds-button--primary.ds-button--filled.ds-button--circle',
+      'div[role="button"].ds-button--filled.ds-button--circle'
     ],
     
-    // Copy button selectors - for the copy icon with "Copy" text
+    // Copy button selectors. The copy control is now an icon-only div[role="button"] (no "Copy"
+    // text); it's identified by its SVG path (see findCopyButton below). Kept for reference.
     copyButton: [
-      'button.ds-text-button .code-info-button-text',
-      'button.ds-text-button:has(.code-info-button-text)',
-      'button.ds-atom-button:has(span:contains("Copy"))',
-      'button[role="button"].ds-text-button'
+      'div[role="button"].ds-button svg path[d^="M6.14929 4.02032"]'
     ],
     
-    // Attach button - paperclip icon
+    // Attach button - paperclip icon (identified by the paperclip SVG path in
+    // uploadFilesDeepSeek; these selectors are fallbacks matching the new ds-button markup)
     attachButton: [
-      'div.f02f0e25.ds-icon-button[role="button"]',
-      'div.bf38813a div.ds-icon-button[role="button"]'
+      'div[role="button"].ds-button svg path[d^="M5.5498 9.75V5H"]',
+      'div.bf38813a div[role="button"].ds-button--iconLabelPrimary'
     ],
     
     // Response container - to detect when AI responds
     responseContainer: [
-      'div.ds-message',
-      'div[class*="message"]',
-      'div.ce41ed1b',
-      '[role="article"]'
+      'div.ds-message'
     ],
     
     // Streaming indicator - to know when response is complete
@@ -57,11 +55,12 @@ const DeepSeekProvider = {
       'button[aria-label*="Stop"]'
     ],
     
-    // Markdown content within responses
+    // Markdown content within responses. The assistant's dedicated answer container is the ONLY
+    // reliable target — `div.ds-markdown` alone is now ambiguous: the reasoning trace is ALSO
+    // rendered as ds-markdown and appears BEFORE the answer in the DOM.
     markdownContent: [
-      'div[class*="markdown"]',
-      'div[class*="content"]',
-      'div.ds-message-content'
+      'div.ds-assistant-message-main-content',
+      'div.ds-markdown'
     ],
 
     // Upload progress indicators - present while upload is in progress
@@ -102,19 +101,25 @@ const DeepSeekProvider = {
   extractResponseText: function(responseElement) {
     // Work on a clone so stripping the reasoning + UI chrome never touches the live page.
     const clone = responseElement.cloneNode(true);
-    clone.querySelectorAll('button, [role="button"], svg').forEach(el => el.remove());
+    clone.querySelectorAll('button, [role="button"], svg, .md-code-block-banner-wrap').forEach(el => el.remove());
     // Drop the reasoning/thinking panel. Its exact class varies across DeepSeek builds, so match
     // defensively on think/reason (the answer container is "markdown"/"ds-markdown", never matched).
     clone
       .querySelectorAll('[class*="think" i], [class*="reason" i], [class*="chain-of-thought" i]')
       .forEach(el => el.remove());
 
-    // Prefer the dedicated answer markdown container (present only once the real answer renders).
-    for (const selector of ['div.ds-markdown', ...this.selectors.markdownContent]) {
+    // Prefer the assistant's dedicated answer container (ds-assistant-message-main-content), which
+    // only exists once the real answer renders. `div.ds-markdown` is NOT sufficient — the reasoning
+    // trace is now also rendered as ds-markdown and precedes the answer in the DOM, so matching it
+    // first returns the chain-of-thought instead of the answer.
+    for (const selector of ['div.ds-assistant-message-main-content', ...this.selectors.markdownContent]) {
       const markdown = clone.querySelector(selector);
       if (markdown) {
         const text = (markdown.textContent || '').trim();
-        if (text) return { text, images: [] };
+        if (text) {
+          console.log(`[DeepSeek] extractResponseText matched "${selector}" -> ${text.length} chars, preview: "${text.substring(0, 80).replace(/\s+/g, ' ')}"`);
+          return { text, images: [] };
+        }
       }
     }
 
@@ -147,8 +152,8 @@ const DeepSeekProvider = {
 
     // Complete once the answer's action toolbar (copy / regenerate) has rendered after the message…
     const parent = latestMessage.parentElement;
-    const actionButtons = parent?.querySelector('div.ds-flex div.ds-icon-button[role="button"]') ||
-                          latestMessage.nextElementSibling?.querySelector('div.ds-icon-button[role="button"]');
+    const actionButtons = parent?.querySelector('div.ds-flex div[role="button"].ds-button') ||
+                          latestMessage.nextElementSibling?.querySelector('div[role="button"].ds-button');
     if (actionButtons) return true;
 
     // …or once a Copy button is present for the answer (alternate DOM where the toolbar is inline).
@@ -175,12 +180,13 @@ const DeepSeekProvider = {
       const latest = messages[messages.length - 1];
 
       const hasToolbar = !!(
-        latest.parentElement?.querySelector('div.ds-flex div.ds-icon-button[role="button"]') ||
-        latest.nextElementSibling?.querySelector('div.ds-icon-button[role="button"]')
+        latest.parentElement?.querySelector('div.ds-flex div[role="button"].ds-button') ||
+        latest.nextElementSibling?.querySelector('div[role="button"].ds-button')
       );
-      // The answer renders into a dedicated markdown / code container that does NOT exist while the
-      // model is only showing its reasoning. No answer container + no toolbar ⇒ still working.
-      const hasAnswer = !!latest.querySelector('div.ds-markdown, div[class*="markdown"], pre code');
+      // The answer renders into the dedicated ds-assistant-message-main-content container, which does
+      // NOT exist while the model is only showing its reasoning. (The reasoning trace is now also
+      // rendered as ds-markdown, so ds-markdown / pre code can't distinguish it from the answer.)
+      const hasAnswer = !!latest.querySelector('div.ds-assistant-message-main-content');
 
       return !hasToolbar && !hasAnswer;
     } catch (e) {
@@ -189,30 +195,25 @@ const DeepSeekProvider = {
     }
   },
   
-  // Find copy button specifically for DeepSeek
+  // Find copy button specifically for DeepSeek.
+  // The copy control is an icon-only div[role="button"] (no "Copy" text) that lives in the action
+  // toolbar, rendered as a SIBLING of the ds-message inside its wrapper — so search from the
+  // message's parent wrapper rather than the message itself.
   findCopyButton: function(responseElement) {
-    // Method 1: Find by the specific "Copy" text
-    const buttons = responseElement.querySelectorAll('button[role="button"].ds-text-button');
-    for (const btn of buttons) {
-      const copyText = btn.querySelector('.code-info-button-text');
-      if (copyText && copyText.textContent.includes('Copy')) {
-        return btn;
-      }
-    }
-    
-    // Method 2: Find by SVG path (the copy icon)
-    const copyIconPath = responseElement.querySelector('svg path[d^="M6.14923 4.02032"]');
+    const scope = responseElement?.parentElement || responseElement;
+    if (!scope) return null;
+
+    // The copy icon path is the only stable identifier (button class names are hashed).
+    const copyIconPath = scope.querySelector('svg path[d^="M6.14929 4.02032"]');
     if (copyIconPath) {
-      return copyIconPath.closest('button');
+      return copyIconPath.closest('div[role="button"]') || copyIconPath.closest('button');
     }
-    
-    // Method 3: Find button with "Copy" text anywhere
-    for (const btn of buttons) {
-      if (btn.textContent.includes('Copy')) {
-        return btn;
-      }
+
+    // Fallback: any button bearing "Copy" text (older layouts).
+    for (const btn of scope.querySelectorAll('div[role="button"], button')) {
+      if ((btn.textContent || '').includes('Copy')) return btn;
     }
-    
+
     return null;
   }
 };

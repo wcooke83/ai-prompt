@@ -9,6 +9,13 @@ const browserAPI = typeof browser !== 'undefined' ? browser : chrome;
 // "Identifier '...' has already been declared" for each one.
 window.__aiPromptContentLoaded = true;
 
+// Bump this string whenever this file changes. Logged at load and again at the start of the
+// DeepSeek send path, so a console log can be checked against this string to tell whether the
+// browser actually reloaded this content script or is still running a stale cached copy -
+// exactly the ambiguity that made an earlier fix look like it hadn't worked.
+const AI_AUTOMATOR_BUILD = 'deepseek-answer-vs-reasoning-fix-2026-09-04';
+console.log('[AI-Automator] content.js loaded, build =', AI_AUTOMATOR_BUILD);
+
 let currentProvider = null;
 let DEBUG = false; // Will be set per-request from background
 let USE_PASTE = false; // Will be set per-request from background
@@ -763,13 +770,25 @@ async function typeText(element, text) {
   // For textarea elements
   if (element.tagName === 'TEXTAREA') {
     console.log('[AI-Automator] Handling TEXTAREA element...');
-    element.value = text;
-    element.dispatchEvent(new InputEvent('input', {
-      bubbles: true,
-      cancelable: true,
-      inputType: 'insertText',
-      data: text
-    }));
+    // A direct `element.value = text` assignment runs through React's patched value setter, which
+    // updates React's internal value tracker to the new value immediately - so when the 'input'
+    // event is dispatched afterward, React's onChange comparison (tracker vs current value) sees no
+    // difference and never fires. The DOM's visible value changes but the app's own composer state
+    // (which gates the send button/action) never learns text was inserted. execCommand runs through
+    // the same native text-insertion path as real typing/paste, so the tracker legitimately falls
+    // out of sync and onChange fires normally.
+    const inserted = document.execCommand('insertText', false, text);
+    await sleep(50);
+    if (!inserted || !element.value.includes(text.substring(0, 20))) {
+      console.log('[AI-Automator] execCommand failed on textarea, falling back to direct value set');
+      element.value = text;
+      element.dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        cancelable: true,
+        inputType: 'insertText',
+        data: text
+      }));
+    }
     console.log('[AI-Automator] Textarea value set, length:', element.value.length);
     console.log('[AI-Automator] ========== typeText END ==========');
     return;
@@ -1347,14 +1366,15 @@ async function uploadFilesDeepSeek(attachments, selectors) {
         attachButton = paperclipPath.closest('div[role="button"]');
       }
       
-      // Method 2: Find by container class near textarea
+      // Method 2: Find by container class near textarea. The attach button is the only
+      // iconLabelPrimary button inside the composer controls (the send button is --primary).
       if (!attachButton) {
-        attachButton = document.querySelector('div.bf38813a div.ds-icon-button[role="button"]');
+        attachButton = document.querySelector('div.bf38813a div[role="button"].ds-button--iconLabelPrimary');
       }
-      
+
       // Method 3: Find by specific class pattern
       if (!attachButton) {
-        attachButton = document.querySelector('div.f02f0e25.ds-icon-button[role="button"]');
+        attachButton = document.querySelector('div[role="button"].ds-button.f02f0e25');
       }
       
       if (attachButton) {
@@ -1608,6 +1628,20 @@ function dumpResponseDiagnostics(selectors, provider, label) {
     }
     if (provider && typeof provider.detectStreamingComplete === 'function') {
       console.log(`[AI-Automator][diag] provider.detectStreamingComplete()=${provider.detectStreamingComplete(document)}`);
+    }
+    if (provider && typeof provider.isLikelyStillGenerating === 'function') {
+      console.log(`[AI-Automator][diag] provider.isLikelyStillGenerating()=${provider.isLikelyStillGenerating(document)}`);
+    }
+    // Show exactly what the extractor would hand back right now, so a wrong target (e.g. the
+    // reasoning trace instead of the answer) is visible in the logs rather than inferred later.
+    if (containers.length > 0 && provider && typeof provider.extractResponseText === 'function') {
+      try {
+        const r = provider.extractResponseText(containers[containers.length - 1]);
+        const t = (r && (r.text || r)) || '';
+        console.log(`[AI-Automator][diag] extractResponseText would return: ${t.length} chars, preview="${t.substring(0, 120).replace(/\s+/g, ' ')}"`);
+      } catch (e) {
+        console.warn('[AI-Automator][diag] extractResponseText probe failed:', e.message);
+      }
     }
   } catch (e) {
     console.warn('[AI-Automator][diag] dump failed:', e.message);
@@ -2068,9 +2102,45 @@ function findElementDeepSeek(selectorList) {
   return null;
 }
 
+// Find the DeepSeek send button fresh (methods 1-3). Re-run this right before EVERY dispatch
+// rather than reusing an older reference - React can replace the button node between an initial
+// click and a later fallback, and dispatching on a detached node silently does nothing.
+function findDeepSeekSendButton() {
+  // Method 1: Find by SVG path (upload arrow)
+  const uploadArrowPath = document.querySelector('svg path[d^="M8.3125 0.981587"]');
+  if (uploadArrowPath) {
+    const btn = uploadArrowPath.closest('div[role="button"]');
+    if (btn && btn.getAttribute('aria-disabled') !== 'true') {
+      return btn;
+    }
+  }
+
+  // Method 2: Find the circular primary send button by its design-system classes
+  // (DeepSeek replaced "ds-icon-button" with "ds-button"; the old class no longer exists).
+  const byClass = document.querySelector(
+    'div[role="button"].ds-button--primary.ds-button--filled.ds-button--circle'
+  );
+  if (byClass && byClass.offsetParent !== null) {
+    return byClass;
+  }
+
+  // Method 3: Scan the composer controls container, skipping the attach (paperclip) button.
+  const container = document.querySelector('div.ec4f5d61, div.bf38813a');
+  if (container) {
+    const buttons = container.querySelectorAll('div[role="button"].ds-button--filled');
+    for (const btn of buttons) {
+      if (btn.offsetParent !== null && !btn.querySelector('svg path[d^="M5.5498 9.75V5H"]')) {
+        return btn;
+      }
+    }
+  }
+
+  return null;
+}
+
 // Click send button - enhanced for DeepSeek
 async function clickSendButtonDeepSeek(selectors, providerName) {
-  console.log('[AI-Automator] clickSendButton called for', providerName);
+  console.log('[AI-Automator] clickSendButton called for', providerName, '| build =', AI_AUTOMATOR_BUILD);
   console.log('[AI-Automator] Looking for selectors:', selectors.sendButton);
 
   let button = null;
@@ -2079,41 +2149,7 @@ async function clickSendButtonDeepSeek(selectors, providerName) {
   while (attempts < 50) {
     // For DeepSeek, need special handling
     if (providerName === 'deepseek') {
-      // Method 1: Find by SVG path (upload arrow)
-      const uploadArrowPath = document.querySelector('svg path[d^="M8.3125 0.981587"]');
-      if (uploadArrowPath) {
-        const btn = uploadArrowPath.closest('div[role="button"]');
-        if (btn && btn.getAttribute('aria-disabled') !== 'true') {
-          button = btn;
-        }
-      }
-      
-      // Method 2: Find by class pattern
-      if (!button) {
-        const buttons = document.querySelectorAll('div._7436101.ds-icon-button[role="button"]');
-        for (const btn of buttons) {
-          if (btn.getAttribute('aria-disabled') !== 'true' && btn.offsetParent !== null) {
-            button = btn;
-            break;
-          }
-        }
-      }
-      
-      // Method 3: Find in the controls container
-      if (!button) {
-        const container = document.querySelector('div.ec4f5d61, div.bf38813a');
-        if (container) {
-          const buttons = container.querySelectorAll('div.ds-icon-button[role="button"]');
-          for (const btn of buttons) {
-            // Skip disabled buttons and the attach button
-            if (btn.getAttribute('aria-disabled') !== 'true' && 
-                !btn.querySelector('svg path[d^="M5.5498 9.75V5H"]')) {
-              button = btn;
-              break;
-            }
-          }
-        }
-      }
+      button = findDeepSeekSendButton();
     } else {
       // Standard approach for other providers
       for (const selector of selectors.sendButton) {
@@ -2146,35 +2182,79 @@ async function clickSendButtonDeepSeek(selectors, providerName) {
     throw new Error('Send button not found or remained disabled');
   }
 
+  // logPointClickability: does the point this button occupies on screen actually resolve back to
+  // this element via elementFromPoint? If not, something else is stacked on top intercepting clicks
+  // even though the button looks clickable and passes every other check - this is the check that
+  // catches an overlay silently eating the dispatch, which nothing else here would reveal.
+  function logButtonState(label, el) {
+    if (!el) {
+      console.log(`[AI-Automator][diag] ${label}: element is null`);
+      return;
+    }
+    const rect = el.getBoundingClientRect();
+    const atPoint = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    console.log(`[AI-Automator][diag] ${label}:`, {
+      isConnected: el.isConnected,
+      ariaDisabled: el.getAttribute('aria-disabled'),
+      offsetParentIsNull: el.offsetParent === null,
+      rect: { x: rect.x, y: rect.y, w: rect.width, h: rect.height },
+      elementFromPointMatches: atPoint === el,
+      elementFromPointTag: atPoint ? atPoint.tagName + '.' + atPoint.className : null
+    });
+  }
+
   console.log('[AI-Automator] Found send button:', {
     tagName: button.tagName,
     role: button.getAttribute('role'),
     ariaLabel: button.getAttribute('aria-label'),
     className: button.className.substring(0, 80)
   });
+  logButtonState('initial button, pre-click', button);
 
-  // For DeepSeek and similar div-based buttons, use pointer events
-  if (button.tagName === 'DIV' && button.getAttribute('role') === 'button') {
-    console.log('[AI-Automator] Using pointer event sequence for div button');
-    button.focus();
-    await sleep(50);
-    
-    ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(eventType => {
-      button.dispatchEvent(new PointerEvent(eventType, {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-        pointerId: 1,
-        isPrimary: true
-      }));
-    });
-  } else {
-    // Standard click for regular buttons
-    console.log('[AI-Automator] Using standard click');
-    button.click();
+  // Click it. A real click() fires a bubbling click event that React's delegated listener
+  // catches (the same mechanism the generic ChatGPT/Grok path uses). The old code called
+  // button.focus() then awaited before dispatching pointer events, which gives React a chance to
+  // re-render and replace the button node mid-click. Verify the send actually happened by
+  // watching the composer clear, and fall back to a pointer sequence only if it did not.
+  const composerTextarea = document.querySelector('textarea[placeholder="Message DeepSeek"]');
+  const beforeValue = composerTextarea ? composerTextarea.value : null;
+  console.log('[AI-Automator] Composer length before click:', beforeValue == null ? null : beforeValue.length);
+
+  button.click();
+  await sleep(300);
+
+  if (composerTextarea && beforeValue !== null && composerTextarea.value.length < beforeValue.length) {
+    console.log('[AI-Automator] Send confirmed (composer cleared) via plain click(). Composer length after:', composerTextarea.value.length);
+    return;
   }
-  
+
+  console.log('[AI-Automator] click() did not clear the composer (length after:', composerTextarea ? composerTextarea.value.length : null, '), retrying with pointer sequence');
+  // Re-find rather than reusing `button`: the 300ms wait above is long enough for React to have
+  // re-rendered and replaced the node (especially now that typing actually updates its state), and
+  // dispatching on a detached node reaches no listener even though the lookup logic is unchanged.
+  const freshButton = (providerName === 'deepseek' ? findDeepSeekSendButton() : null) || button;
+  console.log('[AI-Automator][diag] freshButton === original button:', freshButton === button);
+  logButtonState('freshButton, pre-pointer-sequence', freshButton);
+
+  ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(eventType => {
+    freshButton.dispatchEvent(new PointerEvent(eventType, {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      pointerId: 1,
+      isPrimary: true
+    }));
+  });
+
   await sleep(200);
+  const afterPointerValue = composerTextarea ? composerTextarea.value : null;
+  const pointerSequenceConfirmed = composerTextarea && beforeValue !== null && afterPointerValue.length < beforeValue.length;
+  console.log(
+    pointerSequenceConfirmed
+      ? '[AI-Automator] Send CONFIRMED via pointer sequence (composer cleared). Length after:'
+      : '[AI-Automator][diag] Send NOT confirmed after pointer sequence - composer still holds the prompt. Length after:',
+    afterPointerValue == null ? null : afterPointerValue.length
+  );
   console.log('[AI-Automator] Send button clicked');
 }
 
@@ -2213,26 +2293,47 @@ async function typeTextDeepSeek(element, text) {
 
   if (USE_PASTE) {
     console.log('[AI-Automator] Using paste for DeepSeek...');
-    // For DeepSeek textarea, try standard paste first
-    const dataTransfer = new DataTransfer();
-    dataTransfer.setData('text/plain', text);
+    let insertionMethod = 'execCommand';
 
-    const pasteEvent = new ClipboardEvent('paste', {
-      bubbles: true,
-      cancelable: true,
-      clipboardData: dataTransfer
-    });
-
-    element.dispatchEvent(pasteEvent);
-    
-    // Give paste event time to process
+    // Try the native text-insertion path first. A synthetic ClipboardEvent('paste') is untrusted,
+    // so the browser never runs its default paste-insertion behaviour for it - element.value stays
+    // empty and this always fell through to the "set value directly" branch below, which is its own
+    // dead end: writing element.value runs through React's patched setter, so React's value tracker
+    // is updated to match BEFORE the 'input' event dispatches, and React's onChange (tracker vs
+    // current value) sees no change and never fires. The composer's real state - what Send actually
+    // reads - never learns text was inserted, even though the DOM shows it. execCommand goes through
+    // the same native path as real typing, so the tracker legitimately desyncs and onChange fires.
+    const inserted = document.execCommand('insertText', false, text);
+    console.log('[AI-Automator][diag] execCommand("insertText") returned:', inserted, '| value now includes full text:', !!element.value?.includes(text));
     await sleep(100);
 
-    // If paste didn't work, set value directly
+    if (!inserted || !element.value?.includes(text)) {
+      insertionMethod = 'paste-event';
+      console.log('[AI-Automator] execCommand failed, trying paste event...');
+      const dataTransfer = new DataTransfer();
+      dataTransfer.setData('text/plain', text);
+
+      const pasteEvent = new ClipboardEvent('paste', {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: dataTransfer
+      });
+
+      element.dispatchEvent(pasteEvent);
+
+      // Give paste event time to process
+      await sleep(100);
+      console.log('[AI-Automator][diag] after paste event: value includes full text:', !!element.value?.includes(text));
+    }
+
+    // If neither native path worked, set value directly as a last resort. This still leaves the
+    // app's own React state unsynced (see above) - it exists only so the raw text is on the page for
+    // visual/manual recovery rather than the automation silently doing nothing.
     if (!element.value?.includes(text) && !element.textContent.includes(text)) {
-      console.log('[AI-Automator] Paste failed, setting value directly');
+      insertionMethod = 'direct-set (React state will NOT be synced - Send is expected to no-op)';
+      console.log('[AI-Automator] Paste and execCommand both failed, setting value directly');
       element.value = text;
-      
+
       // Dispatch input event
       element.dispatchEvent(new InputEvent('input', {
         bubbles: true,
@@ -2241,27 +2342,30 @@ async function typeTextDeepSeek(element, text) {
         data: text
       }));
     }
-    
-    console.log('[AI-Automator] Text input complete. Value length:', element.value?.length || element.textContent.length);
+
+    console.log('[AI-Automator] Text input complete via', insertionMethod, '| Value length:', element.value?.length || element.textContent.length, '/ expected', text.length);
     await sleep(100);
   } else {
     console.log('[AI-Automator] Using keystroke simulation for DeepSeek');
-    // Keystroke method
+    // Keystroke method. execCommand runs through the same native insertion path as real typing, so
+    // (unlike setting element.value per character) React's value tracker legitimately desyncs and
+    // onChange fires for each character - see the USE_PASTE branch above for why the direct-value
+    // form of this loop never worked.
     for (const char of text) {
-      // Set value one char at a time
-      element.value = (element.value || '') + char;
-      
-      // Dispatch input event for each char
-      element.dispatchEvent(new InputEvent('input', {
-        bubbles: true,
-        cancelable: true,
-        inputType: 'insertText',
-        data: char
-      }));
-      
+      const inserted = document.execCommand('insertText', false, char);
+      if (!inserted) {
+        element.value = (element.value || '') + char;
+        element.dispatchEvent(new InputEvent('input', {
+          bubbles: true,
+          cancelable: true,
+          inputType: 'insertText',
+          data: char
+        }));
+      }
+
       await sleep(2 + Math.random() * 6);
     }
-    
+
     await sleep(100);
   }
 }
