@@ -52,7 +52,8 @@ function makeProviders() {
  *   tab  'throw' -> getOrCreateSessionTab throws (outer catch path)
  * default when a provider is missing from the map: send 'fail'.
  */
-function runScenario(behaviour, callArgs) {
+function runScenario(behaviour, callArgs, opts = {}) {
+  const disabled = opts.disabled || [];
   const providers = makeProviders();
   const sentTo = [];     // providers that actually received the payload (sendMessage)
   const tabOpens = [];   // providers a tab was opened / requested for
@@ -60,7 +61,7 @@ function runScenario(behaviour, callArgs) {
 
   const sandbox = {
     // --- data the function reads ---
-    sessions: {},
+    sessions: opts.sessions || {},
     keepTabsOpen: false,
     debugLogging: false,
     domStabilizeMs: 0,
@@ -70,7 +71,7 @@ function runScenario(behaviour, callArgs) {
       getAll: () => DEFAULT_ORDER.map((n) => providers[n]),
     },
     getOrderedProviders: () => DEFAULT_ORDER.map((n) => providers[n]),
-    isProviderEnabled: () => true,
+    isProviderEnabled: (n) => !disabled.includes(n),
     usePasteFor: () => false,
     updateSessionUrl: () => {},
     saveSessions: () => {},
@@ -188,6 +189,46 @@ async function main() {
     assert.strictEqual(result.success, true);
     assert.strictEqual(result.provider, 'grok');
     assert.deepStrictEqual(sentTo, ['chatgpt', 'grok'], `chain was: ${sentTo}`);
+  });
+
+  // --- disabled providers never run -------------------------------------------
+  // A session is welded to its provider, so before this check a conversation started on
+  // deepseek kept driving deepseek after the user switched it off in the popup.
+  const sessionOn = (provider) => ({ 'sess-1': { provider, tabId: 1, url: 'https://x/' } });
+  const sessionArgs = ['hello', 'req-1', null, 'sess-1', false, null, []];
+
+  await test('session on a DISABLED provider is refused, not resumed', async () => {
+    const { result, sentTo, tabOpens } = await runScenario(
+      { deepseek: { send: 'ok' } },
+      sessionArgs,
+      { sessions: sessionOn('deepseek'), disabled: ['deepseek'] }
+    );
+    assert.strictEqual(result.success, false);
+    assert.match(result.error, /Provider deepseek is disabled/, `error was: ${result.error}`);
+    assert.deepStrictEqual(sentTo, [], `no payload may be sent, got: ${sentTo}`);
+    assert.deepStrictEqual(tabOpens, [], `no tab may be opened, got: ${tabOpens}`);
+  });
+
+  await test('session on an ENABLED provider still resumes', async () => {
+    const { result, sentTo } = await runScenario(
+      { deepseek: { send: 'ok' } },
+      sessionArgs,
+      { sessions: sessionOn('deepseek'), disabled: [] }
+    );
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.provider, 'deepseek');
+    assert.deepStrictEqual(sentTo, ['deepseek'], `payload went to: ${sentTo}`);
+  });
+
+  await test('a disabled provider is skipped by unpinned auto-selection', async () => {
+    const { result, sentTo } = await runScenario(
+      { chatgpt: { send: 'ok' }, grok: { send: 'ok' } },
+      args(null),
+      { disabled: ['chatgpt'] }
+    );
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.provider, 'grok');
+    assert.ok(!sentTo.includes('chatgpt'), `disabled chatgpt received payload: ${sentTo}`);
   });
 
   console.log('');

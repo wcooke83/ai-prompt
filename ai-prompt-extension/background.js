@@ -678,6 +678,18 @@ async function tryProviderWithFailover(text, request_id, preferredProvider, sess
     const session = sessions[session_id];
     const sessionProvider = ProviderRegistry.get(session.provider);
     if (sessionProvider) {
+      // A session is welded to the provider that minted it (its tab lives there), so it
+      // used to resume unconditionally — which meant a conversation started before you
+      // switched a provider off kept driving that provider forever. Disabling a provider
+      // in the popup has to mean it never runs, old sessions included. Refuse with the
+      // same wording as the pinned-request path below so callers and the router classify
+      // both identically; the caller's next move is to start a fresh conversation, which
+      // will land on a provider (or a browser) that still has this one enabled.
+      if (!isProviderEnabled(sessionProvider.name)) {
+        log('Background', 'info',
+          `Session ${session_id} runs on ${sessionProvider.name}, which is disabled; not resumed.`);
+        return { success: false, error: `Provider ${sessionProvider.name} is disabled` };
+      }
       console.log(`Using existing session with provider: ${sessionProvider.name}`);
       // Continue with this provider, don't failover
       try {
