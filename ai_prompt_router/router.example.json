@@ -1,0 +1,20 @@
+{
+  "listen": { "host": "0.0.0.0", "port": 8300 },
+  "api_keys": [
+    { "name": "securities", "key": "…" },
+    { "name": "dev-laptop", "key": "…" }
+  ],
+  "ws_targets": [ { "url": "ws://127.0.0.1:8760" } ],
+  "unix_socket": { "path": "/tmp/ai-prompt-router.sock" },
+  "strategy": "round_robin",
+  "failover": true,
+  "max_attempts": 3,
+  "health_interval_seconds": 10,
+  "max_hops": 4,
+  "upstreams": [
+    { "name": "ff1",     "url": "http://127.0.0.1:8201", "api_key": "…", "providers": ["chatgpt", "grok"] },
+    { "name": "chrome",  "url": "http://127.0.0.1:8202", "api_key": "…" },
+    { "name": "ff2",     "url": "http://127.0.0.1:8203", "api_key": "…", "enabled": false },
+    { "name": "router-b","url": "http://10.0.0.5:8300",  "api_key": "…" }
+  ]
+}

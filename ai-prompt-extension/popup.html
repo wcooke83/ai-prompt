@@ -544,8 +544,22 @@
               <td>8761</td>
               <td class="cmd">PORT=8202 WS_PORT=8761 ./start-bridge.sh</td>
             </tr>
+            <tr>
+              <td>Router (fronts them all)</td>
+              <td>8300 (cp.cholds.com:8300)</td>
+              <td>&mdash;</td>
+              <td class="cmd">./scripts/start-router.sh</td>
+            </tr>
           </tbody>
         </table>
+      </div>
+      <div class="provider-hint">
+        The <strong>router</strong> is optional and is not a browser: it is one HTTP port in front
+        of every browser's bridge. Apps pointed at it need only that one host/port/key and get
+        round-robined across the bridges; the response header
+        <code>X-AI-Prompt-Upstream</code> names the bridge that actually answered. It has no WS
+        port of its own &mdash; it reaches the bridges over HTTP, and its upstream list lives in
+        <code>router.json</code>, not in this popup.
       </div>
     </div>
 

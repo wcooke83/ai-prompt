@@ -1,0 +1,71 @@
+# systemd unit for the ai-prompt router (example — EDIT THE PATHS FIRST).
+#
+# Use this instead of scripts/start-router.sh on a server, so the router comes
+# back after a reboot. Do not run both: they bind the same port and whichever
+# loses the race exits.
+#
+# EDIT before installing (the values below are the OVH box's, verified 2026-09-07:
+# user `debian`, repo at /home/debian/projects/ai-prompt):
+#   User=                       the account that owns the repo and ~/.ai-prompt
+#   WorkingDirectory=           the repo checkout
+#   Environment=PYTHONPATH=     the same repo path (so `python -m ai_prompt_router` resolves)
+#   Environment=AI_PROMPT_ROUTER_CONFIG=  absolute path to router.json (mode 600 — it holds
+#                                         the upstream bridges' API keys)
+#   ExecStart=                  the repo's ai_prompt_router/.venv/bin/python
+#
+# Install:
+#   sudo cp scripts/ai-prompt-router.service /etc/systemd/system/ai-prompt-router.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ai-prompt-router
+#
+# Operate:
+#   systemctl status ai-prompt-router
+#   journalctl -u ai-prompt-router -f          # live log
+#   journalctl -u ai-prompt-router -n 100      # last 100 lines
+#   sudo systemctl restart ai-prompt-router    # after editing router.json or the router's
+#                                              # Python — there is no hot-reload
+#
+# The router needs no browser and no display; it only speaks HTTP to the
+# bridges. It starts fine before they exist — unhealthy upstreams are skipped
+# and rejoin the rotation when their health check passes.
+
+[Unit]
+Description=ai-prompt router (round-robin front for the ai-prompt bridges)
+Documentation=file:///home/debian/projects/ai-prompt/docs/deploy-router-ovh.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=debian
+WorkingDirectory=/home/debian/projects/ai-prompt
+
+Environment=PYTHONPATH=/home/debian/projects/ai-prompt
+Environment=AI_PROMPT_ROUTER_CONFIG=/home/debian/.ai-prompt/router.json
+# Uncomment to override the port in router.json (listen.port, default 8300):
+# Environment=AI_PROMPT_ROUTER_PORT=8300
+
+ExecStart=/home/debian/projects/ai-prompt/ai_prompt_router/.venv/bin/python -m ai_prompt_router
+
+Restart=on-failure
+RestartSec=3
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ai-prompt-router
+
+NoNewPrivileges=true
+
+# DO NOT set PrivateTmp=true. The unix-socket front listens on
+# /tmp/ai-prompt-router.sock (unix_socket.path in router.json); a private /tmp
+# would hide that socket from ai-prompt-native.py and every other local client.
+# If you want the sandbox anyway, move unix_socket.path somewhere like
+# /run/ai-prompt/router.sock first (and add a RuntimeDirectory= for it).
+#
+# Further hardening is possible (ProtectSystem=strict, ProtectHome=read-only,
+# PrivateDevices=true) but each needs a matching ReadWritePaths= for the config
+# directory — the router writes ~/.ai-prompt/router-sessions.json — so add them
+# one at a time and re-check `systemctl status` after each.
+
+[Install]
+WantedBy=multi-user.target

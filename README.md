@@ -77,6 +77,83 @@ cd ai-prompt-cli && ./ai-prompt.py "What is 2+2?"
 ```
 In this mode turn **Native Messaging off** in the popup and set the **WebSocket Port** to match `WS_PORT`.
 
+## Router (one port in front of many bridges)
+
+`ai_prompt_router/` is an optional standalone service that speaks the **same** HTTP contract as a
+bridge (`POST /prompt`, `GET/DELETE /sessions[/{id}]`, `/status`, `/health`) and round-robins each
+call to one of N configured bridges ("upstreams"). Callers change only host/port/key — nothing
+else in an app changes. It needs no browser of its own; the bridges behind it do.
+
+```
+app ──► router (:8300, key R) ──┬──► bridge, Firefox #1 (:8201, key A)
+                                ├──► bridge, Chrome     (:8202, key B)
+                                └──► router on another box (:8300, key C) ──► its bridges
+```
+
+Only *new* conversations rotate. A follow-up carrying a `session_id` always goes back to the
+bridge that created it, because the tab lives in that browser. An upstream that fails *before* the
+prompt was sent (connection refused, 503 extension-not-connected, a rejected key, a pinned provider
+it doesn't have) is retried on the next eligible upstream; a prompt that ran and timed out is never
+re-sent.
+
+### Configure
+
+`router.json`, found via `AI_PROMPT_ROUTER_CONFIG` (default `~/.ai-prompt/router.json`). Start from
+the shipped example and lock it down — it holds the upstream bridges' keys:
+
+```bash
+mkdir -p ~/.ai-prompt
+cp ai_prompt_router/router.example.json ~/.ai-prompt/router.json
+chmod 600 ~/.ai-prompt/router.json
+```
+
+- `api_keys` — a list of **per-app** Bearer keys (`{"name": "securities", "key": "…"}`). Any listed
+  key authenticates; its `name` is logged and echoed as `X-AI-Prompt-Client`, so revoking one app
+  is deleting one entry. An empty list means no auth on the HTTP front (same rule as the bridge).
+- `upstreams` — the bridges: `name`, `url`, `api_key`, optional `providers` (only consulted when a
+  request pins a provider) and `enabled: false` to park one out of rotation for maintenance.
+- `ws_targets` — WebSocket servers the router dials **out** to, impersonating the extension, so
+  `ai-prompt.py` and a standalone bridge can drive it unchanged. Omit to disable.
+- `unix_socket.path` — the socket `ai-prompt-native.py --socket` can point at (default
+  `/tmp/ai-prompt-router.sock`, mode 0600). Set to `null` to disable.
+- Session ownership persists in `~/.ai-prompt/router-sessions.json`, so a restart keeps follow-ups
+  routed correctly.
+
+**No hot-reload**, exactly like the bridge: restart the router after editing `router.json` or the
+router's Python.
+
+### Run
+
+```bash
+python3 -m venv ai_prompt_router/.venv
+ai_prompt_router/.venv/bin/pip install -r ai_prompt_router/requirements.txt
+
+./scripts/start-router.sh            # (re)start on :8300, wait until ready
+./scripts/start-router.sh --status
+./scripts/start-router.sh --stop
+# PORT=8301 ./scripts/start-router.sh   # a second router
+```
+
+On a server use `scripts/ai-prompt-router.service` (systemd, restarts on failure and after a
+reboot) instead of the script — install commands are in the unit's header. The OVH deployment,
+including the firewall change that makes the router the only public port, is
+[docs/deploy-router-ovh.md](docs/deploy-router-ovh.md).
+
+### Seeing where a prompt went
+
+Every response carries `X-AI-Prompt-Upstream: <name>`, so the JSON contract is unchanged but the
+routing is visible:
+
+```bash
+curl -sD- -o/dev/null -X POST http://localhost:8300/prompt \
+  -H "Authorization: Bearer $ROUTER_KEY" -H "Content-Type: application/json" \
+  -d '{"text": "hi", "ephemeral": true}' | grep -i x-ai-prompt-upstream
+```
+
+`GET /upstreams` (router-only, requires a key) is the operator dashboard: per upstream its health,
+last error, in-flight count and sessions owned, plus the state of each WebSocket target and the
+unix-socket path.
+
 ## Components
 
 | Directory | Description | README |
@@ -107,6 +184,8 @@ The API reads environment variables with the `AI_PROMPT_` prefix:
 | `AI_PROMPT_HOST` | 0.0.0.0 | API listen address |
 | `AI_PROMPT_API_KEY` | *(none)* | Optional Bearer token for auth |
 | `AI_PROMPT_DEFAULT_TIMEOUT` | 120 | Prompt timeout in seconds |
+| `AI_PROMPT_ROUTER_CONFIG` | `~/.ai-prompt/router.json` | Router config file (router only) |
+| `AI_PROMPT_ROUTER_PORT` | 8300 | Router HTTP port, overrides `listen.port` (router only) |
 
 ## Requirements
 

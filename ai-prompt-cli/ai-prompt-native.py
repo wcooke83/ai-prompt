@@ -10,15 +10,32 @@ import sys
 import tempfile
 import uuid
 
-SOCKET_PATH = os.path.join(tempfile.gettempdir(), 'ai-prompt-native.sock')
+# Where the browser-managed native host puts its CLI socket. It is overridable
+# because the very same protocol is now also served by ai-prompt-router (default
+# /tmp/ai-prompt-router.sock), which fans one CLI invocation out over several
+# browsers -- pointing this script at that socket is the whole integration.
+DEFAULT_SOCKET_PATH = os.path.join(tempfile.gettempdir(), 'ai-prompt-native.sock')
+SOCKET_ENV_VAR = 'AI_PROMPT_NATIVE_SOCKET'
+SOCKET_PATH = DEFAULT_SOCKET_PATH  # kept as a module-level name for compatibility
 
 
-async def send_and_receive(message, timeout=120):
+def resolve_socket_path(cli_value=None):
+    """--socket beats $AI_PROMPT_NATIVE_SOCKET beats the native host's default."""
+    return cli_value or os.environ.get(SOCKET_ENV_VAR) or DEFAULT_SOCKET_PATH
+
+
+async def send_and_receive(message, timeout=120, socket_path=None):
     """Send a message to native host and wait for response."""
+    path = socket_path or resolve_socket_path()
     try:
-        reader, writer = await asyncio.open_unix_connection(SOCKET_PATH)
+        reader, writer = await asyncio.open_unix_connection(path)
     except (FileNotFoundError, ConnectionRefusedError):
-        return {'success': False, 'error': 'Native host not running. Is Firefox open with the extension?'}
+        # Keep the default-path wording byte-identical (callers and docs quote it);
+        # only name the path when the user picked a non-default one, where "is
+        # Firefox open?" would be answering the wrong question.
+        if path == DEFAULT_SOCKET_PATH:
+            return {'success': False, 'error': 'Native host not running. Is Firefox open with the extension?'}
+        return {'success': False, 'error': f'Nothing listening on {path}'}
 
     try:
         # Send message with length prefix
@@ -60,7 +77,7 @@ async def main_async(args, prompt):
     if args.provider:
         message['provider'] = args.provider
 
-    response = await send_and_receive(message, args.timeout)
+    response = await send_and_receive(message, args.timeout, socket_path=args.socket)
 
     if args.json:
         output = {
@@ -104,11 +121,16 @@ def main():
     parser.add_argument("--json", "-j", action="store_true",
                         help="Output response as JSON (includes session_id)")
     parser.add_argument("--status", action="store_true", help="Check native host status")
+    parser.add_argument("--socket", type=str, default=None,
+                        help=f"Path to the host unix socket "
+                             f"(default: ${SOCKET_ENV_VAR} or {DEFAULT_SOCKET_PATH}); "
+                             f"point it at ai-prompt-router's socket to fan out over browsers")
 
     args = parser.parse_args()
 
     if args.status:
-        response = asyncio.run(send_and_receive({'type': 'status', 'request_id': 'status'}))
+        response = asyncio.run(send_and_receive({'type': 'status', 'request_id': 'status'},
+                                                socket_path=args.socket))
         if response.get('connected'):
             print("Native host: connected to extension")
         else:
