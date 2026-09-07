@@ -47,7 +47,12 @@ status() { curl -s --max-time 5 "http://localhost:${PORT}/status" 2>/dev/null ||
 
 stop_bridge() {
     local pids
-    pids=$(lsof -ti "tcp:${PORT}" 2>/dev/null || true)
+    # -sTCP:LISTEN is load-bearing: a bare `lsof -i tcp:PORT` also matches processes
+    # holding an ESTABLISHED connection *to* that port. Once the router is running
+    # beside the bridges it keeps keep-alive sockets open to every bridge port, so
+    # without this filter `--stop` would take the router down as collateral (and
+    # vice versa for any app connected to the router).
+    pids=$(lsof -ti "tcp:${PORT}" -sTCP:LISTEN 2>/dev/null || true)
     if [[ -n "$pids" ]]; then
         echo "Stopping bridge on :${PORT} (pid $(echo "$pids" | tr '\n' ' '))..."
         echo "$pids" | xargs kill 2>/dev/null || true
