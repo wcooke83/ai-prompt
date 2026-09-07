@@ -45,12 +45,25 @@ RETRYABLE_ROWS = [
     pytest.param(respond_status(403, {"detail": "forbidden"}), id="http-403"),
     pytest.param(respond_failure("Extension not connected"), id="body-extension-not-connected"),
     pytest.param(respond_failure("Provider grok is not available"), id="body-provider-unavailable"),
+    # The strings background.js actually emits when a pinned provider cannot run in that
+    # browser. Nothing is typed into a page on any of these paths, so moving to the next
+    # browser is safe -- and it is the only thing that makes a pinned provider survive
+    # being switched off in one popup.
+    pytest.param(respond_failure("Provider deepseek is disabled"), id="body-provider-disabled"),
+    pytest.param(respond_failure("All providers are disabled"), id="body-all-providers-disabled"),
 ]
 
 FINAL_ROWS = [
     pytest.param(respond_failure("Timeout after 120s"), id="body-timeout"),
     pytest.param(respond_failure("ChatGPT returned an empty response"), id="body-other-error"),
     pytest.param(raise_transport(httpx.ReadTimeout("read timed out")), id="read-timeout"),
+    # Guards the narrowness of PROVIDER_UNAVAILABLE_MARKERS: content.js throws this
+    # AFTER typing the prompt into the page, so matching the bare word "disabled" here
+    # would risk sending the same prompt to a second browser.
+    pytest.param(
+        respond_failure("Send button not found or remained disabled"),
+        id="body-send-button-disabled",
+    ),
 ]
 
 

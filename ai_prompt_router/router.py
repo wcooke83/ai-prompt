@@ -47,11 +47,24 @@ RECHECK_DELAY_SECONDS = 2.0
 HOPS_HEADER = "X-AI-Prompt-Hops"
 VIA_HEADER = "X-AI-Prompt-Via"
 
-# Substrings in a 200 `success:false` error that mean the prompt was never sent, so a
-# retry cannot double-send. Matched case-insensitively against the bridge's own text.
-RETRYABLE_ERROR_MARKERS = (
-    "extension not connected",  # the bridge lost the extension before sending
-    "not available",            # pinned provider missing on that browser
+# The bridge lost the extension before sending. Retryable, and it also tells us the
+# upstream is down right now, so we mark it as well.
+EXTENSION_GONE_MARKER = "extension not connected"
+
+# Substrings in a 200 `success:false` error that mean this browser could not offer the
+# requested provider at all, so nothing was typed and nothing was sent -- a retry on the
+# next upstream cannot double-send. The provider itself never changes; only which
+# browser we ask, which is what keeps the bridge's "true pin" promise intact.
+#
+# These are matched case-insensitively against the exact strings background.js emits,
+# and they are deliberately narrow. In particular, match "is disabled" / "are disabled"
+# and NEVER the bare word "disabled": content.js throws "Send button not found or
+# remained disabled" *after* the prompt has been typed into the page, and treating that
+# as retryable would risk sending the same prompt twice.
+PROVIDER_UNAVAILABLE_MARKERS = (
+    "not available",               # background.js:574 - no selectors for it in this build
+    "is disabled",                 # background.js:729 - pinned provider switched off in that popup
+    "all providers are disabled",  # background.js:764 - every provider switched off in that browser
 )
 
 
@@ -383,12 +396,13 @@ class Router:
             return _Attempt(retry=False, response=parsed)
 
         error_text = (parsed.error or "").lower()
-        if "extension not connected" in error_text:
-            self._mark_down(upstream, parsed.error or "extension not connected")
+        if EXTENSION_GONE_MARKER in error_text:
+            self._mark_down(upstream, parsed.error or EXTENSION_GONE_MARKER)
             return _Attempt(retry=True, response=parsed, error=parsed.error)
-        if "not available" in error_text:
-            # Pinned provider missing on that browser; nothing was sent. The provider
-            # itself never changes -- only which browser we ask.
+        if any(marker in error_text for marker in PROVIDER_UNAVAILABLE_MARKERS):
+            # This browser cannot offer that provider (missing, or switched off in its
+            # popup). Nothing was sent, so ask the next browser for the SAME provider.
+            # The upstream stays healthy -- it is fine, it just does not have this one.
             return _Attempt(retry=True, response=parsed, error=parsed.error)
 
         # "Timeout after Ns" and every other error: the provider ran and failed (or
