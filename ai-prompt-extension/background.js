@@ -567,6 +567,37 @@ async function injectContentScripts(tabId) {
   }
 }
 
+// Wait for a tab to finish loading, but never forever. ChatGPT sometimes leaves one
+// request hanging, so Firefox keeps the tab "loading" (spinner on the tab) even though the
+// page is drawn and usable, and 'complete' never fires. Waiting on it with no limit hung
+// the prompt until the bridge timed out and left the tab open. After maxMs we carry on;
+// the content script still waits for the input box itself.
+const TAB_LOAD_MAX_MS = 20000;
+async function waitForTabComplete(tabId, maxMs = TAB_LOAD_MAX_MS) {
+  await new Promise(resolve => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      browserAPI.tabs.onUpdated.removeListener(listener);
+      resolve();
+    };
+    const listener = (id, info) => {
+      if (id === tabId && info.status === 'complete') finish();
+    };
+    const timer = setTimeout(() => {
+      if (!done) console.log(`Tab ${tabId} still loading after ${maxMs} ms; continuing`);
+      finish();
+    }, maxMs);
+    browserAPI.tabs.onUpdated.addListener(listener);
+    // 'complete' may already have fired before the listener was added.
+    Promise.resolve(browserAPI.tabs.get(tabId))
+      .then(tab => { if (tab && tab.status === 'complete') finish(); })
+      .catch(() => {});
+  });
+}
+
 // Create tab for provider
 async function createProviderTab(providerName) {
   const provider = ProviderRegistry.get(providerName);
@@ -579,16 +610,8 @@ async function createProviderTab(providerName) {
   const newTab = await browserAPI.tabs.create({ url: newChatUrl, active: !hideTabs });
   await applyTabVisibility(newTab.id);
 
-  // Wait for page to load completely
-  await new Promise(resolve => {
-    const listener = (tabId, info) => {
-      if (tabId === newTab.id && info.status === 'complete') {
-        browserAPI.tabs.onUpdated.removeListener(listener);
-        resolve();
-      }
-    };
-    browserAPI.tabs.onUpdated.addListener(listener);
-  });
+  // Wait for page to load (capped: see waitForTabComplete)
+  await waitForTabComplete(newTab.id);
 
   // Give page extra time to initialize
   await new Promise(resolve => setTimeout(resolve, 2000));
@@ -638,16 +661,8 @@ async function getOrCreateSessionTab(sessionId, preferredProvider) {
       if (session.url) {
         const newTab = await browserAPI.tabs.create({ url: session.url, active: !hideTabs });
         await applyTabVisibility(newTab.id);
-        // Wait for page to load
-        await new Promise(resolve => {
-          const listener = (tabId, info) => {
-            if (tabId === newTab.id && info.status === 'complete') {
-              browserAPI.tabs.onUpdated.removeListener(listener);
-              resolve();
-            }
-          };
-          browserAPI.tabs.onUpdated.addListener(listener);
-        });
+        // Wait for page to load (capped: see waitForTabComplete)
+        await waitForTabComplete(newTab.id);
         // Update session with new tab ID
         sessions[sessionId].tabId = newTab.id;
         saveSessions();
