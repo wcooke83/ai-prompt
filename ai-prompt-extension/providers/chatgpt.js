@@ -7,6 +7,10 @@ const ChatGPTProvider = {
   selectors: {
     textarea: [
       '#prompt-textarea',
+      // Nov 2026 ChatGPT: the composer is a ProseMirror contenteditable with no id inside
+      // <form data-chatgpt-composer>; its placeholder moved to the inner <p>.
+      'form[data-chatgpt-composer] div.ProseMirror[contenteditable="true"]',
+      'div.ProseMirror[contenteditable="true"][role="textbox"]',
       'div[contenteditable="true"][id="prompt-textarea"]',
       'div[id="prompt-textarea"]',
       'textarea[data-id="root"]',
@@ -17,11 +21,18 @@ const ChatGPTProvider = {
       'button[data-testid="send-button"]',
       'button[data-testid="composer-send-button"]',
       'button[aria-label="Send prompt"]',
+      // Nov 2026: <button type="submit" aria-label="Send"> with no data-testid
+      'form[data-chatgpt-composer] button[type="submit"][aria-label="Send"]',
       'button[aria-label*="Send"]',
       'form button[type="submit"]'
     ],
     responseContainer: [
-      // ChatGPT renders each turn as <section data-testid="conversation-turn-N"> in current
+      // Nov 2026 ChatGPT: no conversation-turn testids. Each assistant reply is a unit div keyed
+      // "<turn>:<n>:assistant" holding an sr-only <h4 data-conversation-role="assistant"> and the
+      // markdown. findAllElements uses the first selector that matches anything.
+      '[data-content-search-unit-key$=":assistant"]',
+      'div:has(> h4[data-conversation-role="assistant"])',
+      // Older builds: ChatGPT renders each turn as <section data-testid="conversation-turn-N"> in current
       // builds (older builds used <article>). Match tag-agnostically on the data-testid so the
       // container is found regardless of which wrapper element the live ChatGPT build ships.
       '[data-testid^="conversation-turn-"]'
@@ -29,7 +40,8 @@ const ChatGPTProvider = {
     streamingIndicator: [
       'button[aria-label="Stop generating"]',
       'button[aria-label="Stop streaming"]',
-      'button[data-testid="stop-button"]'
+      'button[data-testid="stop-button"]',
+      'form[data-chatgpt-composer] button[aria-label^="Stop"]'
     ],
     modelIndicator: [
       'button[data-testid="model-switcher-dropdown-button"]',
@@ -72,7 +84,16 @@ const ChatGPTProvider = {
   // Find the latest assistant response article
   findLatestAssistantResponse: function(document) {
     console.log('[ChatGPT] Finding latest assistant response...');
-    
+
+    // Nov 2026 DOM: the assistant units themselves (see selectors.responseContainer)
+    for (const sel of this.selectors.responseContainer.slice(0, 2)) {
+      const units = document.querySelectorAll(sel);
+      if (units.length > 0) {
+        console.log('[ChatGPT] Assistant units found:', units.length, 'via', sel);
+        return units[units.length - 1];
+      }
+    }
+
     // Find all conversation turns (tag-agnostic: current ChatGPT uses <section>, older <article>)
     const articles = document.querySelectorAll('[data-testid^="conversation-turn-"]');
     console.log('[ChatGPT] Total conversation turns found:', articles.length);
@@ -165,8 +186,19 @@ const ChatGPTProvider = {
       return false;
     }
     
+    // Nov 2026 DOM: the turn wrapper carries data-talvt-turn-state="complete" once the reply has
+    // finished; when present it is authoritative. Otherwise look for the turn's action buttons
+    // (Copy / Share / More actions sit on the turn, outside the assistant unit).
+    const stateEl = latestResponse.closest('[data-talvt-turn-state]');
+    if (stateEl) {
+      const state = stateEl.getAttribute('data-talvt-turn-state');
+      console.log('[ChatGPT] Turn state:', state);
+      console.log('[ChatGPT] ═══════════════════════════════════════════════════');
+      return state === 'complete';
+    }
+
     // Check for completion buttons
-    const hasButtons = this.hasCompletionButtons(latestResponse);
+    const hasButtons = this.hasCompletionButtons(latestResponse.closest('[data-turn-key]') || latestResponse);
     console.log('[ChatGPT] Result:', hasButtons ? '✓ COMPLETE' : '✗ NOT COMPLETE');
     console.log('[ChatGPT] ═══════════════════════════════════════════════════');
     return hasButtons;
@@ -181,7 +213,10 @@ const ChatGPTProvider = {
     // own <p> elements. Extracting <p>/<pre> from the whole turn concatenates that ad text onto the
     // answer and corrupts JSON responses. Narrow to the actual assistant message markdown first,
     // falling back progressively so a future DOM tweak degrades instead of breaking.
-    const scope = container.querySelector('[data-message-author-role="assistant"] .markdown')
+    // Nov 2026 DOM: the answer is the last [data-markdown-text-style="assistant-message"] root.
+    const mdRoots = container.querySelectorAll('[data-markdown-text-style="assistant-message"]');
+    const scope = (mdRoots.length > 0 ? mdRoots[mdRoots.length - 1] : null)
+      || container.querySelector('[data-message-author-role="assistant"] .markdown')
       || container.querySelector('[data-message-author-role="assistant"]')
       || container;
     if (scope !== container) {
@@ -190,14 +225,21 @@ const ChatGPTProvider = {
 
     // Method 1: Extract code blocks directly from DOM
     // Clicking "Copy code" button doesn't work because synthetic events aren't trusted
-    // and the Clipboard API blocks untrusted event access
-    const codeBlocks = scope.querySelectorAll('pre code');
+    // and the Clipboard API blocks untrusted event access.
+    // Nov 2026 code blocks have no <pre>: [data-code-block] > [data-code-block-source] > code,
+    // one <span> per line, so read them with innerText to keep the line breaks.
+    let codeBlocks = scope.querySelectorAll('pre code');
+    let readCode = (code) => code.textContent;
+    if (codeBlocks.length === 0) {
+      codeBlocks = scope.querySelectorAll('[data-code-block-source] code');
+      readCode = (code) => (code.innerText && code.innerText.trim() ? code.innerText : code.textContent);
+    }
     console.log('[ChatGPT] Found', codeBlocks.length, 'code blocks');
 
     if (codeBlocks.length > 0) {
       // If there's exactly one code block, return just its content
       if (codeBlocks.length === 1) {
-        const codeText = codeBlocks[0].textContent;
+        const codeText = readCode(codeBlocks[0]);
         console.log('[ChatGPT] Single code block, length:', codeText.length);
         console.log('[ChatGPT] ═══════════════════════════════════════════════════');
         return { text: codeText, images: [] };
@@ -209,7 +251,7 @@ const ChatGPTProvider = {
         // Try to get language from class (e.g., "language-json")
         const langMatch = code.className.match(/language-(\w+)/);
         const lang = langMatch ? langMatch[1] : '';
-        const codeText = code.textContent;
+        const codeText = readCode(code);
         console.log(`[ChatGPT] Code block ${index}: ${lang || 'no-lang'}, length: ${codeText.length}`);
         parts.push('```' + lang + '\n' + codeText + '\n```');
       });
@@ -234,7 +276,12 @@ const ChatGPTProvider = {
       }
     });
 
-    const fullText = textParts.join('\n');
+    let fullText = textParts.join('\n');
+    // No <p> in the answer markdown (e.g. a bare list or heading): fall back to its visible text.
+    if (!fullText && mdRoots.length > 0) {
+      fullText = (scope.innerText || scope.textContent || '').trim();
+      console.log('[ChatGPT] No <p> text; used markdown root text instead');
+    }
     console.log('[ChatGPT] Total extracted text length:', fullText.length);
     console.log('[ChatGPT] First 150 chars:', fullText.substring(0, 150));
     console.log('[ChatGPT] ═══════════════════════════════════════════════════');
